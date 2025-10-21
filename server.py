@@ -2561,7 +2561,139 @@ ${historyString}
 </html>
 """
 
+DEMO_FORM_HTML = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自动填表演示</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+        body {
+            font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: radial-gradient(circle at top, #f8fafc, #e2e8f0);
+            color: #1e293b;
+        }
+        main {
+            background: rgba(255, 255, 255, 0.94);
+            box-shadow: 0 20px 45px rgba(15, 23, 42, 0.12);
+            border-radius: 20px;
+            padding: 40px 48px;
+            width: min(480px, calc(100% - 32px));
+        }
+        h1 {
+            font-size: 26px;
+            margin: 0 0 12px;
+            color: #0f172a;
+        }
+        p {
+            margin: 8px 0 20px;
+            line-height: 1.6;
+            font-size: 15px;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+        label {
+            font-weight: 600;
+            font-size: 14px;
+            color: #1e293b;
+        }
+        input[type="text"],
+        input[type="email"] {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #cbd5f5;
+            border-radius: 10px;
+            font-size: 15px;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        input[type="text"]:focus,
+        input[type="email"]:focus {
+            outline: none;
+            border-color: #60a5fa;
+            box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.25);
+        }
+        .captcha-placeholder {
+            padding: 16px;
+            border-radius: 12px;
+            background: #e2e8f0;
+            font-size: 14px;
+            color: #334155;
+        }
+        button[type="submit"] {
+            background: #94a3b8;
+            color: #ffffff;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 999px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: not-allowed;
+            letter-spacing: 0.03em;
+        }
+        .notice {
+            font-size: 13px;
+            color: #475569;
+            background: #f8fafc;
+            border-left: 4px solid #2563eb;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        @media (max-width: 480px) {
+            main {
+                padding: 28px 24px;
+            }
+            h1 {
+                font-size: 22px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>本地自动填表演示</h1>
+        <p>此页面用于演示如何在 <code>mine-builder2-server</code> 内部生成的表单中，利用 Selenium 与 Faker 自动填充姓名与邮箱。</p>
+        <div class="notice">
+            ⚠️ 仅限在自有或已获得授权的站点演示与学习使用。禁止对第三方网站或任何带有风控的注册页面运行此脚本。
+        </div>
+        <form id="demo-autofill-form" action="#" method="post">
+            <div>
+                <label for="demo-name">姓名</label>
+                <input id="demo-name" name="name" type="text" placeholder="请输入姓名" autocomplete="name">
+            </div>
+            <div>
+                <label for="demo-email">邮箱</label>
+                <input id="demo-email" name="email" type="email" placeholder="请输入邮箱" autocomplete="email">
+            </div>
+            <div class="captcha-placeholder">
+                这里可以放置验证码或人工确认步骤。本演示不提供验证码，也不会自动提交表单。
+            </div>
+            <button type="submit" disabled>提交（演示禁用）</button>
+        </form>
+    </main>
+</body>
+</html>
+"""
+
 # --- Flask 路由 ---
+@app.route('/demo-form')
+def demo_form():
+    """提供本地自动填表演示表单。"""
+    return render_template_string(DEMO_FORM_HTML)
+
 @app.route('/')
 def index():
     """提供主HTML页面内容。"""
