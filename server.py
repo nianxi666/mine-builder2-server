@@ -249,6 +249,15 @@ HTML_CONTENT = """
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
+                <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
+                <button id="play-animation-btn" class="bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>播放动画</button>
+                <div class="mt-2">
+                    <label for="animation-speed-slider" class="block text-xs font-medium text-gray-400">速度</label>
+                    <input type="range" id="animation-speed-slider" min="1" max="100" value="50" class="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer">
+                </div>
+            </div>
+
+            <div class="mt-3 pt-3 border-t border-gray-700">
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">AI 工具</h3>
                 <button id="ai-assistant-btn" class="relative bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full sparkle-button" disabled>
                     ✨ AI 助手
@@ -657,12 +666,15 @@ HTML_CONTENT = """
                 else child.material.dispose();
             }
             const exportBtn = document.getElementById('export-txt-btn');
+            const playAnimationBtn = document.getElementById('play-animation-btn');
             if (currentVoxelCoords.size === 0) {
                 if(exportBtn) exportBtn.disabled = true;
+                if(playAnimationBtn) playAnimationBtn.disabled = true;
                 updateSelectionUI();
                 return;
             }
             if(exportBtn) exportBtn.disabled = false;
+            if(playAnimationBtn) playAnimationBtn.disabled = false;
 
             const materialToInstancesMap = new Map();
             currentVoxelCoords.forEach(coordString => {
@@ -1720,6 +1732,7 @@ ${historyString}
         // ====================================================================
 
         function unlockUI() {
+            window.playFallingAnimation = playFallingAnimation;
             const mainContainer = document.getElementById('main-container');
             const apiKeyModal = document.getElementById('api-key-modal');
 
@@ -1921,6 +1934,7 @@ ${historyString}
             });
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
+            document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
         });
 
         // --- 存档功能函数 ---
@@ -2059,6 +2073,100 @@ ${historyString}
                 console.error('Import from URL error:', error);
                 addAiChatMessage('system', `❌ 从URL导入存档失败: ${error.message}`);
             }
+        }
+
+        async function playFallingAnimation() {
+            if (currentVoxelCoords.size === 0) return;
+
+            const playBtn = document.getElementById('play-animation-btn');
+            playBtn.disabled = true;
+            playBtn.textContent = '播放中...';
+
+            // Hide the main voxel group
+            voxelContainerGroup.visible = false;
+
+            const voxels = Array.from(currentVoxelCoords).map(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const props = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                return { x, y, z, props };
+            });
+
+            // Sort voxels from bottom to top, then by x, then by z
+            voxels.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
+
+            const animationGroup = new THREE.Group();
+            scene.add(animationGroup);
+
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+
+            const speedSlider = document.getElementById('animation-speed-slider');
+            const maxDelay = 200; // Corresponds to speed 1
+            const minDelay = 5;   // Corresponds to speed 100
+            const speedValue = parseInt(speedSlider.value, 10);
+            // Inverse mapping: lower slider value means higher delay
+            const delayBetweenVoxels = maxDelay - ((speedValue - 1) / 99) * (maxDelay - minDelay);
+
+
+            for (let i = 0; i < voxels.length; i++) {
+                const voxel = voxels[i];
+                const halfGrid = GRID_SIZE / 2;
+                const targetX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
+                const targetY = (voxel.y + 0.5) * VOXEL_SIZE;
+                const targetZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
+                const startY = GRID_SIZE * 1.5;
+
+                const textureKey = getTextureKeyForVoxel(voxel.props.blockId, voxel.props.metaData, DEFAULT_BLOCK_ID_LIST);
+                const texture = loadedTextures.get(textureKey);
+                const material = texture ?
+                    new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 }) :
+                    new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[textureKey] || 0xff00ff });
+
+                const mesh = new THREE.Mesh(baseVoxelGeometry, material);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                mesh.position.set(targetX, startY, targetZ);
+                animationGroup.add(mesh);
+
+                // Animate the fall
+                setTimeout(() => {
+                    const fallDuration = 500 + Math.random() * 300; // Duration of fall in ms
+                    const startTime = Date.now();
+
+                    function animateFall() {
+                        const elapsedTime = Date.now() - startTime;
+                        let t = elapsedTime / fallDuration;
+                        t = t < 1 ? t : 1; // Clamp t to 1
+
+                        // Ease-out cubic interpolation
+                        const easedT = 1 - Math.pow(1 - t, 3);
+
+                        mesh.position.y = startY * (1 - easedT) + targetY * easedT;
+
+                        if (t < 1) {
+                            requestAnimationFrame(animateFall);
+                        } else {
+                            mesh.position.y = targetY; // Ensure it lands exactly
+                        }
+                    }
+                    animateFall();
+                }, i * delayBetweenVoxels);
+            }
+
+            // Cleanup after animation completes
+            setTimeout(() => {
+                scene.remove(animationGroup);
+                animationGroup.children.forEach(child => {
+                    child.geometry.dispose();
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach(m => m.dispose());
+                    } else {
+                        child.material.dispose();
+                    }
+                });
+                voxelContainerGroup.visible = true;
+                playBtn.disabled = false;
+                playBtn.textContent = '播放动画';
+            }, voxels.length * delayBetweenVoxels + 1000); // Wait for all animations to finish + buffer
         }
 
         async function applySaveData(saveData) {
