@@ -226,6 +226,24 @@ HTML_CONTENT = """
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
+                <h3 class="text-xs font-semibold mb-1 text-gray-300">动画演示</h3>
+                <div class="space-y-2">
+                    <button id="play-drop-animation-btn" class="bg-pink-600 hover:bg-pink-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50">🎬 方块掉落重建</button>
+                    <label class="block text-xs font-medium text-gray-300">掉落速度: <span id="drop-speed-label" class="font-semibold">1.0x</span></label>
+                    <input type="range" id="drop-speed-range" min="0.2" max="3" step="0.1" value="1" class="w-full">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">录制时长(秒)</label>
+                            <input type="number" id="record-seconds-input" min="1" max="10" value="4" class="w-full p-1 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-xs">
+                        </div>
+                        <div class="flex items-end">
+                            <button id="record-drop-animation-btn" class="bg-amber-600 hover:bg-amber-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50">🎥 录制并导出 WebM</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-3 pt-3 border-t border-gray-700">
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">截图 & 导出</h3>
                 <button id="screenshot-btn" class="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>单视角截图</button>
                 <button id="multi-screenshot-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mt-1.5 disabled:opacity-50 disabled:cursor-wait" disabled>多视角拼贴图</button>
@@ -333,6 +351,9 @@ HTML_CONTENT = """
         window.isKeyPreValidated = {{ is_key_pre_validated | tojson }};
         window.apiKeyFromFile = "{{ api_key_from_file }}";
         window.initialSaveData = {{ initial_save_data | tojson }};
+        window.initialVoxelTxtUrl = "{{ initial_voxel_txt_url or '' }}";
+        window.initialAutoplaySeconds = {{ initial_autoplay_seconds | tojson }};
+        window.initialAutoRecord = {{ initial_auto_record | tojson }};
     </script>
     <script type="module">
         // ====================================================================
@@ -368,6 +389,13 @@ HTML_CONTENT = """
         const mouseNdc = new THREE.Vector2();
         let isolateTimer = null;
         let allMaterialsCache = null;
+
+        // --- Drop Animation State ---
+        let isDropAnimating = false;
+        let dropAnimationGroup = null;
+        let dropAnimState = null;
+        let dropSpeedMultiplier = 1.0;
+        let dropAutoplaySecondsRemaining = null;
 
         // --- Agent State ---
         let isAgentRunning = false;
@@ -631,9 +659,16 @@ HTML_CONTENT = """
             animate();
         }
 
+        let __lastAnimTime = performance.now();
         function animate() {
             requestAnimationFrame(animate);
+            const __now = performance.now();
+            const __dt = (__now - __lastAnimTime) / 1000;
+            __lastAnimTime = __now;
             controls.update();
+            if (isDropAnimating && typeof updateDropAnimation === 'function') {
+                updateDropAnimation(__dt);
+            }
             renderer.render(scene, camera);
         }
 
@@ -708,6 +743,262 @@ HTML_CONTENT = """
             if (selectedVoxelCoords.size === 0) selectedPartId = null;
             updateSelectionHighlight();
             updateSelectionUI();
+        }
+
+        // ====================================================================
+        // Drop Animation (Voxel Rain Rebuild)
+        // ====================================================================
+        function startVoxelDropAnimation(autoplaySeconds = null) {
+            if (isDropAnimating) return;
+            if (currentVoxelCoords.size === 0) {
+                alert('请先加载或恢复一个体素模型。');
+                return;
+            }
+            isDropAnimating = true;
+            dropAutoplaySecondsRemaining = typeof autoplaySeconds === 'number' ? autoplaySeconds : null;
+
+            const playBtn = document.getElementById('play-drop-animation-btn');
+            if (playBtn) playBtn.disabled = true;
+
+            if (voxelContainerGroup) voxelContainerGroup.visible = false;
+            if (selectionHighlightMesh) selectionHighlightMesh.visible = false;
+
+            const halfGrid = GRID_SIZE / 2;
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+
+            const voxData = [];
+            currentVoxelCoords.forEach(coordString => {
+                const props = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                const textureKey = getTextureKeyForVoxel(props.blockId, props.metaData, DEFAULT_BLOCK_ID_LIST);
+                const [x, y, z] = coordString.split(',').map(Number);
+                const posX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const posY = (y + 0.5) * VOXEL_SIZE;
+                const posZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+                voxData.push({ textureKey, position: new THREE.Vector3(posX, posY, posZ) });
+            });
+
+            // Global order: y asc -> x asc -> z asc
+            voxData.sort((a, b) => {
+                if (a.position.y !== b.position.y) return a.position.y - b.position.y;
+                if (a.position.x !== b.position.x) return a.position.x - b.position.x;
+                return a.position.z - b.position.z;
+            });
+
+            const counts = new Map();
+            voxData.forEach(v => counts.set(v.textureKey, (counts.get(v.textureKey) || 0) + 1));
+
+            dropAnimationGroup = new THREE.Group();
+
+            const perTex = new Map();
+            counts.forEach((cap, textureKey) => {
+                let material;
+                const texture = loadedTextures.get(textureKey);
+                if (texture) {
+                    material = new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 });
+                } else {
+                    const color = TEXTURE_KEY_TO_COLOR_MAP[textureKey] || TEXTURE_KEY_TO_COLOR_MAP['unknown'];
+                    material = new THREE.MeshLambertMaterial({ color });
+                }
+                const instancedMesh = new THREE.InstancedMesh(baseVoxelGeometry, material, cap);
+                instancedMesh.castShadow = true;
+                instancedMesh.receiveShadow = true;
+                instancedMesh.count = 0;
+                dropAnimationGroup.add(instancedMesh);
+                perTex.set(textureKey, {
+                    mesh: instancedMesh,
+                    finals: [],
+                    count: 0
+                });
+            });
+
+            const order = [];
+            voxData.forEach(v => {
+                const s = perTex.get(v.textureKey);
+                s.finals.push(v.position);
+                order.push(v.textureKey);
+            });
+
+            scene.add(dropAnimationGroup);
+
+            dropAnimState = {
+                order,
+                perTex,
+                index: 0,
+                current: null,
+                baseGravity: 60,
+                baseBounce: VOXEL_SIZE * 0.25
+            };
+        }
+
+        function updateDropAnimation(dt) {
+            if (!isDropAnimating || !dropAnimState) return;
+
+            if (dropAutoplaySecondsRemaining !== null) {
+                dropAutoplaySecondsRemaining -= dt;
+                if (dropAutoplaySecondsRemaining <= 0) {
+                    endVoxelDropAnimation();
+                    return;
+                }
+            }
+
+            const speed = Math.max(0.2, dropSpeedMultiplier || 1.0);
+            const g = dropAnimState.baseGravity * speed;
+
+            if (!dropAnimState.current) {
+                if (dropAnimState.index >= dropAnimState.order.length) {
+                    endVoxelDropAnimation();
+                    return;
+                }
+                const textureKey = dropAnimState.order[dropAnimState.index];
+                const s = dropAnimState.perTex.get(textureKey);
+                const localIndex = s.count;
+                const finalPos = s.finals[localIndex];
+                const dropHeight = GRID_SIZE * (1.0 + Math.random() * 0.6);
+                const startPos = new THREE.Vector3(
+                    finalPos.x + (Math.random() - 0.5) * VOXEL_SIZE * 2.0,
+                    finalPos.y + dropHeight,
+                    finalPos.z + (Math.random() - 0.5) * VOXEL_SIZE * 2.0
+                );
+                const h = startPos.y - finalPos.y;
+                const fallDuration = Math.sqrt(Math.max(0.0001, 2 * h / g));
+
+                const mat = new THREE.Matrix4().setPosition(startPos.x, startPos.y, startPos.z);
+                s.mesh.setMatrixAt(localIndex, mat);
+                s.mesh.count = localIndex + 1;
+                s.mesh.instanceMatrix.needsUpdate = true;
+
+                dropAnimState.current = {
+                    textureKey,
+                    s,
+                    localIndex,
+                    startPos,
+                    finalPos,
+                    t: 0,
+                    fallDuration,
+                    phase: 'fall'
+                };
+                return;
+            }
+
+            const C = dropAnimState.current;
+            C.t += dt;
+            if (C.phase === 'fall') {
+                const t = Math.min(C.t, C.fallDuration);
+                const yn = C.startPos.y - 0.5 * g * t * t;
+                const tn = Math.min(1, t / C.fallDuration);
+                const xn = C.startPos.x + (C.finalPos.x - C.startPos.x) * tn;
+                const zn = C.startPos.z + (C.finalPos.z - C.startPos.z) * tn;
+
+                const mat = new THREE.Matrix4().setPosition(xn, Math.max(yn, C.finalPos.y), zn);
+                C.s.mesh.setMatrixAt(C.localIndex, mat);
+                C.s.mesh.instanceMatrix.needsUpdate = true;
+
+                if (C.t >= C.fallDuration) {
+                    C.phase = 'bounce';
+                    C.t = 0;
+                }
+                return;
+            }
+
+            if (C.phase === 'bounce') {
+                const t = C.t;
+                const amp = dropAnimState.baseBounce;
+                const damp = 8;
+                const freq = 12;
+                const offset = amp * Math.exp(-damp * t) * Math.abs(Math.cos(freq * t));
+                const squash = Math.exp(-damp * t) * Math.abs(Math.sin(freq * t));
+                const sY = 1 - 0.15 * squash;
+                const sXZ = 1 + 0.15 * squash;
+
+                const pos = new THREE.Vector3(C.finalPos.x, C.finalPos.y + offset, C.finalPos.z);
+                const quat = new THREE.Quaternion();
+                const scale = new THREE.Vector3(sXZ, sY, sXZ);
+                const mat = new THREE.Matrix4().compose(pos, quat, scale);
+                C.s.mesh.setMatrixAt(C.localIndex, mat);
+                C.s.mesh.instanceMatrix.needsUpdate = true;
+
+                const bounceDuration = 0.28 / speed;
+                if (t >= bounceDuration) {
+                    const finalMat = new THREE.Matrix4().setPosition(C.finalPos.x, C.finalPos.y, C.finalPos.z);
+                    C.s.mesh.setMatrixAt(C.localIndex, finalMat);
+                    C.s.mesh.instanceMatrix.needsUpdate = true;
+
+                    C.s.count++;
+                    dropAnimState.index++;
+                    dropAnimState.current = null;
+                }
+            }
+        }
+
+        function endVoxelDropAnimation() {
+            if (dropAnimationGroup) {
+                scene.remove(dropAnimationGroup);
+                dropAnimationGroup.children.forEach(c => {
+                    if (c.geometry) c.geometry.dispose();
+                    if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+                    else if (c.material) c.material.dispose();
+                });
+                dropAnimationGroup = null;
+            }
+            if (voxelContainerGroup) voxelContainerGroup.visible = true;
+            if (selectionHighlightMesh) selectionHighlightMesh.visible = true;
+
+            const playBtn = document.getElementById('play-drop-animation-btn');
+            if (playBtn) playBtn.disabled = false;
+
+            isDropAnimating = false;
+            dropAnimState = null;
+
+            renderer.render(scene, camera);
+        }
+
+        async function recordDropAnimation(seconds = 4) {
+            if (isDropAnimating) return;
+            if (!renderer || !renderer.domElement) return;
+            if (currentVoxelCoords.size === 0) {
+                alert('请先加载或恢复一个体素模型。');
+                return;
+            }
+            const btn = document.getElementById('record-drop-animation-btn');
+            let originalText = '';
+            if (btn) { originalText = btn.textContent; btn.textContent = '录制中...'; btn.disabled = true; }
+
+            const canvas = renderer.domElement;
+            const fps = 30;
+            const stream = canvas.captureStream ? canvas.captureStream(fps) : null;
+            if (!stream || typeof MediaRecorder === 'undefined') {
+                alert('当前浏览器不支持画布录制 (MediaRecorder)。请在支持的浏览器中尝试。');
+                if (btn) { btn.textContent = originalText; btn.disabled = false; }
+                return;
+            }
+            const chunks = [];
+            let mimeType = '';
+            if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mimeType = 'video/webm;codecs=vp9';
+            else if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) mimeType = 'video/webm;codecs=vp8';
+            else mimeType = 'video/webm';
+
+            const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4000000 });
+            recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+            const stopped = new Promise(resolve => recorder.onstop = resolve);
+
+            recorder.start();
+            startVoxelDropAnimation(seconds);
+            await sleep((seconds + 0.25) * 1000);
+            recorder.stop();
+            await stopped;
+
+            const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `voxel_drop_${Date.now()}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            if (btn) { btn.textContent = originalText; btn.disabled = false; }
+            addAiChatMessage('system', '🎥 动画已导出为 WebM 视频。');
         }
 
         function voxelizeAndDisplay(model) {
@@ -1027,6 +1318,93 @@ HTML_CONTENT = """
             document.body.removeChild(link);
         }
 
+        // 从TXT导入体素（按导出格式）
+        function parseVoxelTxt(text) {
+            const lines = text.split(/\r?\n/);
+            const voxMap = new Map();
+            lines.forEach(line => {
+                const s = line.trim();
+                if (!s || s.startsWith('#')) return;
+                const parts = s.split(/\s+/);
+                if (parts.length < 5) return;
+                const x = parseInt(parts[0], 10);
+                const y = parseInt(parts[1], 10);
+                const z = parseInt(parts[2], 10);
+                const blockId = parseInt(parts[3], 10) || 0;
+                const metaData = parseInt(parts[4], 10) || 0;
+                if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                    const key = `${x},${y},${z}`;
+                    voxMap.set(key, { blockId, metaData, partId: 'txtImport' });
+                }
+            });
+            return voxMap;
+        }
+
+        function normalizeGithubUrl(url) {
+            try {
+                const u = new URL(url);
+                if (u.hostname === 'github.com' && u.pathname.includes('/blob/')) {
+                    const parts = u.pathname.split('/').filter(Boolean);
+                    // github.com/user/repo/blob/branch/path -> raw.githubusercontent.com/user/repo/branch/path
+                    const user = parts[0];
+                    const repo = parts[1];
+                    const branch = parts[3];
+                    const path = parts.slice(4).join('/');
+                    return `https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}`;
+                }
+                return url;
+            } catch (e) {
+                return url;
+            }
+        }
+
+        async function loadVoxelTxtFromUrl(url, autoStart = false, autoplaySeconds = null) {
+            try {
+                const finalUrl = normalizeGithubUrl(url);
+                addAiChatMessage('system', `正在从URL加载体素TXT: ${finalUrl}`);
+                const resp = await fetch(finalUrl, { cache: 'no-store' });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const text = await resp.text();
+                const voxMap = parseVoxelTxt(text);
+                if (voxMap.size === 0) throw new Error('解析失败或文件为空');
+
+                currentVoxelCoords.clear();
+                voxelProperties.clear();
+                voxMap.forEach((props, key) => {
+                    currentVoxelCoords.add(key);
+                    voxelProperties.set(key, props);
+                });
+
+                if (!loadedModel) {
+                    loadedModel = new THREE.Group();
+                    loadedModel.name = 'TXT Import Placeholder';
+                }
+
+                displayVoxels();
+                updateAgentButtonState();
+                saveAppStateToLocalStorage();
+
+                // 默认加速一点，避免等待过长
+                const range = document.getElementById('drop-speed-range');
+                const label = document.getElementById('drop-speed-label');
+                if (range && label) {
+                    // 自动预设为 2.0x，加快预览
+                    dropSpeedMultiplier = 2.0;
+                    range.value = String(dropSpeedMultiplier);
+                    label.textContent = dropSpeedMultiplier.toFixed(1) + 'x';
+                }
+
+                if (autoStart) {
+                    startVoxelDropAnimation(autoplaySeconds);
+                }
+
+                addAiChatMessage('system', `体素TXT加载完成，共 ${voxMap.size} 个方块。`);
+            } catch (err) {
+                console.error('loadVoxelTxtFromUrl error:', err);
+                addAiChatMessage('system', `加载体素TXT失败: ${err.message}`);
+            }
+        }
+
 
         function handleDeleteSelection() {
             if (selectedVoxelCoords.size > 0) {
@@ -1076,7 +1454,7 @@ HTML_CONTENT = """
         }
 
         function onCanvasClick(event) {
-            if (isAgentRunning) return;
+            if (isAgentRunning || isDropAnimating) return;
             const mount = document.getElementById('mount');
             if (!mount || !raycaster || !camera || !voxelContainerGroup || currentVoxelCoords.size === 0) return;
             const rect = mount.getBoundingClientRect();
@@ -1738,6 +2116,22 @@ ${historyString}
             console.log("Initializing application...");
             init(); // Init 3D scene & UI bindings
 
+            // 如果URL提供了体素TXT，优先加载并自动播放
+            if (window.initialVoxelTxtUrl) {
+                try {
+                    await loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
+                    await loadInitialFilesFromServer(true);
+                    if (window.initialAutoRecord) {
+                        await sleep(300);
+                        recordDropAnimation(window.initialAutoplaySeconds || 4);
+                    }
+                    console.log('Initialization complete (loaded voxel TXT from URL).');
+                    return;
+                } catch (e) {
+                    console.warn('Failed to load initial voxel TXT URL:', e);
+                }
+            }
+
             // --- 智能加载顺序 ---
             // 1. 优先从命令行传入的存档文件加载
             if (window.initialSaveData) {
@@ -1846,6 +2240,14 @@ ${historyString}
                     init();
                     applySaveData(window.initialSaveData);
                     // AI features will remain locked until a key is entered manually.
+                } else if (window.initialVoxelTxtUrl) {
+                    console.log("Initial voxel TXT URL found, unlocking UI to show animation without API key.");
+                    unlockUI();
+                    init();
+                    loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
+                    if (window.initialAutoRecord) {
+                        setTimeout(() => recordDropAnimation(window.initialAutoplaySeconds || 4), 300);
+                    }
                 }
             }
 
@@ -1921,6 +2323,29 @@ ${historyString}
             });
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
+
+            // --- 动画控件 ---
+            const dropSpeedRange = document.getElementById('drop-speed-range');
+            const dropSpeedLabel = document.getElementById('drop-speed-label');
+            if (dropSpeedRange && dropSpeedLabel) {
+                dropSpeedRange.addEventListener('input', () => {
+                    dropSpeedMultiplier = parseFloat(dropSpeedRange.value);
+                    dropSpeedLabel.textContent = dropSpeedMultiplier.toFixed(1) + 'x';
+                });
+                dropSpeedLabel.textContent = dropSpeedMultiplier.toFixed(1) + 'x';
+            }
+            const playDropBtn = document.getElementById('play-drop-animation-btn');
+            if (playDropBtn) {
+                playDropBtn.addEventListener('click', startVoxelDropAnimation);
+            }
+            const recordBtn = document.getElementById('record-drop-animation-btn');
+            const recordSecondsInput = document.getElementById('record-seconds-input');
+            if (recordBtn && recordSecondsInput) {
+                recordBtn.addEventListener('click', () => {
+                    const secs = Math.max(1, Math.min(10, parseInt(recordSecondsInput.value) || 4));
+                    recordDropAnimation(secs);
+                });
+            }
         });
 
         // --- 存档功能函数 ---
@@ -2141,11 +2566,20 @@ ${historyString}
 def index():
     """提供主HTML页面内容。"""
     # 将服务器端验证的密钥和状态传递给前端模板
+    # 解析自动播放秒数
+    try:
+        initial_autoplay_seconds = int(request.args.get('autoplay_seconds', 4))
+    except Exception:
+        initial_autoplay_seconds = 4
+
     return render_template_string(
         HTML_CONTENT,
         api_key_from_file=API_KEY_FROM_FILE if API_KEY_VALIDATED else '',
         is_key_pre_validated=API_KEY_VALIDATED,
-        initial_save_data=INITIAL_SAVE_DATA
+        initial_save_data=INITIAL_SAVE_DATA,
+        initial_voxel_txt_url=request.args.get('voxel_txt_url', ''),
+        initial_autoplay_seconds=initial_autoplay_seconds,
+        initial_auto_record=str(request.args.get('auto_record', '0')).lower() in ('1','true','yes')
     )
 
 @app.route('/api/files')
