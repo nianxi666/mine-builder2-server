@@ -249,6 +249,13 @@ HTML_CONTENT = """
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
+                <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
+                <button id="play-animation-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5" disabled>播放掉落动画</button>
+                <label for="animation-speed-slider" class="block text-xs font-semibold mb-1.5 text-gray-300">速度: <span id="animation-speed-value">1.0</span>x</label>
+                <input type="range" id="animation-speed-slider" min="0.1" max="5" step="0.1" value="1" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" disabled>
+            </div>
+
+            <div class="mt-3 pt-3 border-t border-gray-700">
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">AI 工具</h3>
                 <button id="ai-assistant-btn" class="relative bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full sparkle-button" disabled>
                     ✨ AI 助手
@@ -375,6 +382,7 @@ HTML_CONTENT = """
         let agentAbortController = null;
         let agentCurrentPartIndex = 0;
         let agentOverallAnalysis = "";
+        let isAnimationPlaying = false;
 
         // ====================================================================
         // NEW: Automated Loading and Data Processing
@@ -657,12 +665,18 @@ HTML_CONTENT = """
                 else child.material.dispose();
             }
             const exportBtn = document.getElementById('export-txt-btn');
-            if (currentVoxelCoords.size === 0) {
-                if(exportBtn) exportBtn.disabled = true;
+            const animationBtn = document.getElementById('play-animation-btn');
+            const animationSlider = document.getElementById('animation-speed-slider');
+
+            const hasVoxels = currentVoxelCoords.size > 0;
+            if(exportBtn) exportBtn.disabled = !hasVoxels;
+            if(animationBtn) animationBtn.disabled = !hasVoxels;
+            if(animationSlider) animationSlider.disabled = !hasVoxels;
+
+            if (!hasVoxels) {
                 updateSelectionUI();
                 return;
             }
-            if(exportBtn) exportBtn.disabled = false;
 
             const materialToInstancesMap = new Map();
             currentVoxelCoords.forEach(coordString => {
@@ -834,6 +848,149 @@ HTML_CONTENT = """
             }
             displayVoxels();
         }
+
+        function playFallingAnimation() {
+            if (isAnimationPlaying || currentVoxelCoords.size === 0) return;
+
+            isAnimationPlaying = true;
+            document.getElementById('play-animation-btn').disabled = true;
+
+            const animationSpeed = parseFloat(document.getElementById('animation-speed-slider').value) || 1.0;
+            const voxels = [];
+            const halfGrid = GRID_SIZE / 2;
+
+            // 1. 收集并排序所有体素
+            currentVoxelCoords.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const voxelProps = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                const targetPosition = new THREE.Vector3(
+                    -halfGrid + (x + 0.5) * VOXEL_SIZE,
+                    (y + 0.5) * VOXEL_SIZE,
+                    -halfGrid + (z + 0.5) * VOXEL_SIZE
+                );
+                voxels.push({ coordString, voxelProps, targetPosition });
+            });
+
+            // 从下到上排序，这样底部的方块先掉落
+            voxels.sort((a, b) => a.targetPosition.y - b.targetPosition.y);
+
+            // 2. 隐藏原始模型
+            voxelContainerGroup.visible = false;
+
+            // 3. 为动画创建专用的体素
+            const animationGroup = new THREE.Group();
+            scene.add(animationGroup);
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+            const materialCache = new Map();
+
+            voxels.forEach(voxel => {
+                const textureKey = getTextureKeyForVoxel(voxel.voxelProps.blockId, voxel.voxelProps.metaData, DEFAULT_BLOCK_ID_LIST);
+                let material;
+                if (materialCache.has(textureKey)) {
+                    material = materialCache.get(textureKey);
+                } else {
+                    const texture = loadedTextures.get(textureKey);
+                    if (texture) {
+                        material = new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 });
+                    } else {
+                        const color = TEXTURE_KEY_TO_COLOR_MAP[textureKey] || TEXTURE_KEY_TO_COLOR_MAP['unknown'];
+                        material = new THREE.MeshLambertMaterial({ color });
+                    }
+                    materialCache.set(textureKey, material);
+                }
+
+                const mesh = new THREE.Mesh(baseVoxelGeometry, material);
+                mesh.castShadow = true;
+                // 将方块放置在场景上方的一个随机起始位置
+                mesh.position.copy(voxel.targetPosition);
+                mesh.position.y += GRID_SIZE * 1.5; // 从上方掉落
+                mesh.position.x += (Math.random() - 0.5) * GRID_SIZE * 0.5;
+                mesh.position.z += (Math.random() - 0.5) * GRID_SIZE * 0.5;
+
+                voxel.mesh = mesh;
+                voxel.startTime = -1; // 动画开始时间
+                animationGroup.add(mesh);
+            });
+
+            // 4. 动画循环
+            let startTime = null;
+            const fallDuration = 1000 / animationSpeed;
+            const staggerDelay = 50 / animationSpeed;
+
+            function animationLoop(timestamp) {
+                if (startTime === null) startTime = timestamp;
+                const elapsedTime = timestamp - startTime;
+
+                let allFinished = true;
+                voxels.forEach((voxel, index) => {
+                    if (voxel.startTime < 0) {
+                        // 如果到了这个方块的开始时间
+                        if (elapsedTime > index * staggerDelay) {
+                            voxel.startTime = timestamp;
+                        } else {
+                             allFinished = false; // 还有方块没开始掉落
+                        }
+                    }
+
+                    if (voxel.startTime >= 0) {
+                        const voxelElapsedTime = timestamp - voxel.startTime;
+                        const progress = Math.min(voxelElapsedTime / fallDuration, 1);
+
+                        // 使用 easeOutBounce 缓动函数
+                        const t = progress;
+                        const c = 1.0;
+                        let newY;
+                        if (t < (1 / 2.75)) {
+                            newY = c * (7.5625 * t * t);
+                        } else if (t < (2 / 2.75)) {
+                            newY = c * (7.5625 * (t -= (1.5 / 2.75)) * t + 0.75);
+                        } else if (t < (2.5 / 2.75)) {
+                            newY = c * (7.5625 * (t -= (2.25 / 2.75)) * t + 0.9375);
+                        } else {
+                            newY = c * (7.5625 * (t -= (2.625 / 2.75)) * t + 0.984375);
+                        }
+
+                        const startY = voxel.targetPosition.y + GRID_SIZE * 1.5;
+                        const endY = voxel.targetPosition.y;
+                        voxel.mesh.position.y = startY - (startY - endY) * newY;
+
+                        // 简单的水平移动插值
+                        const startX = voxel.mesh.userData.startX || voxel.mesh.position.x;
+                        const startZ = voxel.mesh.userData.startZ || voxel.mesh.position.z;
+                        if (!voxel.mesh.userData.startX) {
+                            voxel.mesh.userData.startX = startX;
+                            voxel.mesh.userData.startZ = startZ;
+                        }
+                        voxel.mesh.position.x = THREE.MathUtils.lerp(startX, voxel.targetPosition.x, progress);
+                        voxel.mesh.position.z = THREE.MathUtils.lerp(startZ, voxel.targetPosition.z, progress);
+
+
+                        if (progress < 1) {
+                            allFinished = false;
+                        } else {
+                            voxel.mesh.position.copy(voxel.targetPosition); // 确保最终位置精确
+                        }
+                    }
+                });
+
+                if (allFinished) {
+                    // 5. 清理
+                    scene.remove(animationGroup);
+                    baseVoxelGeometry.dispose();
+                    materialCache.forEach(material => material.dispose());
+                    voxelContainerGroup.visible = true;
+                    isAnimationPlaying = false;
+                     // 重新启用按钮，但要检查模型是否存在
+                    document.getElementById('play-animation-btn').disabled = currentVoxelCoords.size === 0;
+                    console.log("Animation finished.");
+                } else {
+                    requestAnimationFrame(animationLoop);
+                }
+            }
+
+            requestAnimationFrame(animationLoop);
+        }
+
 
         // ====================================================================
         // UI Interaction Handlers
@@ -1764,6 +1921,13 @@ ${historyString}
             console.log("Application initialization complete (loaded default files).");
         }
 
+        // Make key functions globally available for testing
+        window.init = init;
+        window.initializeApp = initializeApp;
+        window.displayVoxels = displayVoxels;
+        window.unlockUI = unlockUI;
+        window.playFallingAnimation = playFallingAnimation;
+
         async function handleApiKeyValidation() {
             const modalInput = document.getElementById('modal-api-key-input');
             const errorMsg = document.getElementById('api-key-error-msg');
@@ -1921,6 +2085,14 @@ ${historyString}
             });
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
+
+            // --- 动画功能事件监听器 ---
+            document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
+            const animationSpeedSlider = document.getElementById('animation-speed-slider');
+            const animationSpeedValue = document.getElementById('animation-speed-value');
+            animationSpeedSlider.addEventListener('input', () => {
+                animationSpeedValue.textContent = parseFloat(animationSpeedSlider.value).toFixed(1);
+            });
         });
 
         // --- 存档功能函数 ---
