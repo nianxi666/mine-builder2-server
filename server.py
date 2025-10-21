@@ -231,6 +231,15 @@ HTML_CONTENT = """
                     <button id="play-drop-animation-btn" class="bg-pink-600 hover:bg-pink-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50">🎬 方块掉落重建</button>
                     <label class="block text-xs font-medium text-gray-300">掉落速度: <span id="drop-speed-label" class="font-semibold">1.0x</span></label>
                     <input type="range" id="drop-speed-range" min="0.2" max="3" step="0.1" value="1" class="w-full">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-300 mb-1">录制时长(秒)</label>
+                            <input type="number" id="record-seconds-input" min="1" max="10" value="4" class="w-full p-1 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-xs">
+                        </div>
+                        <div class="flex items-end">
+                            <button id="record-drop-animation-btn" class="bg-amber-600 hover:bg-amber-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50">🎥 录制并导出 WebM</button>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -344,6 +353,7 @@ HTML_CONTENT = """
         window.initialSaveData = {{ initial_save_data | tojson }};
         window.initialVoxelTxtUrl = "{{ initial_voxel_txt_url or '' }}";
         window.initialAutoplaySeconds = {{ initial_autoplay_seconds | tojson }};
+        window.initialAutoRecord = {{ initial_auto_record | tojson }};
     </script>
     <script type="module">
         // ====================================================================
@@ -940,6 +950,55 @@ HTML_CONTENT = """
             dropAnimState = null;
 
             renderer.render(scene, camera);
+        }
+
+        async function recordDropAnimation(seconds = 4) {
+            if (isDropAnimating) return;
+            if (!renderer || !renderer.domElement) return;
+            if (currentVoxelCoords.size === 0) {
+                alert('请先加载或恢复一个体素模型。');
+                return;
+            }
+            const btn = document.getElementById('record-drop-animation-btn');
+            let originalText = '';
+            if (btn) { originalText = btn.textContent; btn.textContent = '录制中...'; btn.disabled = true; }
+
+            const canvas = renderer.domElement;
+            const fps = 30;
+            const stream = canvas.captureStream ? canvas.captureStream(fps) : null;
+            if (!stream || typeof MediaRecorder === 'undefined') {
+                alert('当前浏览器不支持画布录制 (MediaRecorder)。请在支持的浏览器中尝试。');
+                if (btn) { btn.textContent = originalText; btn.disabled = false; }
+                return;
+            }
+            const chunks = [];
+            let mimeType = '';
+            if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mimeType = 'video/webm;codecs=vp9';
+            else if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) mimeType = 'video/webm;codecs=vp8';
+            else mimeType = 'video/webm';
+
+            const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4000000 });
+            recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+            const stopped = new Promise(resolve => recorder.onstop = resolve);
+
+            recorder.start();
+            startVoxelDropAnimation(seconds);
+            await sleep((seconds + 0.25) * 1000);
+            recorder.stop();
+            await stopped;
+
+            const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `voxel_drop_${Date.now()}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            if (btn) { btn.textContent = originalText; btn.disabled = false; }
+            addAiChatMessage('system', '🎥 动画已导出为 WebM 视频。');
         }
 
         function voxelizeAndDisplay(model) {
@@ -2062,6 +2121,10 @@ ${historyString}
                 try {
                     await loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
                     await loadInitialFilesFromServer(true);
+                    if (window.initialAutoRecord) {
+                        await sleep(300);
+                        recordDropAnimation(window.initialAutoplaySeconds || 4);
+                    }
                     console.log('Initialization complete (loaded voxel TXT from URL).');
                     return;
                 } catch (e) {
@@ -2182,6 +2245,9 @@ ${historyString}
                     unlockUI();
                     init();
                     loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
+                    if (window.initialAutoRecord) {
+                        setTimeout(() => recordDropAnimation(window.initialAutoplaySeconds || 4), 300);
+                    }
                 }
             }
 
@@ -2271,6 +2337,14 @@ ${historyString}
             const playDropBtn = document.getElementById('play-drop-animation-btn');
             if (playDropBtn) {
                 playDropBtn.addEventListener('click', startVoxelDropAnimation);
+            }
+            const recordBtn = document.getElementById('record-drop-animation-btn');
+            const recordSecondsInput = document.getElementById('record-seconds-input');
+            if (recordBtn && recordSecondsInput) {
+                recordBtn.addEventListener('click', () => {
+                    const secs = Math.max(1, Math.min(10, parseInt(recordSecondsInput.value) || 4));
+                    recordDropAnimation(secs);
+                });
             }
         });
 
@@ -2504,7 +2578,8 @@ def index():
         is_key_pre_validated=API_KEY_VALIDATED,
         initial_save_data=INITIAL_SAVE_DATA,
         initial_voxel_txt_url=request.args.get('voxel_txt_url', ''),
-        initial_autoplay_seconds=initial_autoplay_seconds
+        initial_autoplay_seconds=initial_autoplay_seconds,
+        initial_auto_record=str(request.args.get('auto_record', '0')).lower() in ('1','true','yes')
     )
 
 @app.route('/api/files')
