@@ -342,6 +342,8 @@ HTML_CONTENT = """
         window.isKeyPreValidated = {{ is_key_pre_validated | tojson }};
         window.apiKeyFromFile = "{{ api_key_from_file }}";
         window.initialSaveData = {{ initial_save_data | tojson }};
+        window.initialVoxelTxtUrl = "{{ initial_voxel_txt_url or '' }}";
+        window.initialAutoplaySeconds = {{ initial_autoplay_seconds | tojson }};
     </script>
     <script type="module">
         // ====================================================================
@@ -383,6 +385,7 @@ HTML_CONTENT = """
         let dropAnimationGroup = null;
         let dropAnimState = null;
         let dropSpeedMultiplier = 1.0;
+        let dropAutoplaySecondsRemaining = null;
 
         // --- Agent State ---
         let isAgentRunning = false;
@@ -735,13 +738,14 @@ HTML_CONTENT = """
         // ====================================================================
         // Drop Animation (Voxel Rain Rebuild)
         // ====================================================================
-        function startVoxelDropAnimation() {
+        function startVoxelDropAnimation(autoplaySeconds = null) {
             if (isDropAnimating) return;
             if (currentVoxelCoords.size === 0) {
                 alert('请先加载或恢复一个体素模型。');
                 return;
             }
             isDropAnimating = true;
+            dropAutoplaySecondsRemaining = typeof autoplaySeconds === 'number' ? autoplaySeconds : null;
 
             const playBtn = document.getElementById('play-drop-animation-btn');
             if (playBtn) playBtn.disabled = true;
@@ -818,6 +822,14 @@ HTML_CONTENT = """
 
         function updateDropAnimation(dt) {
             if (!isDropAnimating || !dropAnimState) return;
+
+            if (dropAutoplaySecondsRemaining !== null) {
+                dropAutoplaySecondsRemaining -= dt;
+                if (dropAutoplaySecondsRemaining <= 0) {
+                    endVoxelDropAnimation();
+                    return;
+                }
+            }
 
             const speed = Math.max(0.2, dropSpeedMultiplier || 1.0);
             const g = dropAnimState.baseGravity * speed;
@@ -1245,6 +1257,93 @@ HTML_CONTENT = """
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+        }
+
+        // 从TXT导入体素（按导出格式）
+        function parseVoxelTxt(text) {
+            const lines = text.split(/\r?\n/);
+            const voxMap = new Map();
+            lines.forEach(line => {
+                const s = line.trim();
+                if (!s || s.startsWith('#')) return;
+                const parts = s.split(/\s+/);
+                if (parts.length < 5) return;
+                const x = parseInt(parts[0], 10);
+                const y = parseInt(parts[1], 10);
+                const z = parseInt(parts[2], 10);
+                const blockId = parseInt(parts[3], 10) || 0;
+                const metaData = parseInt(parts[4], 10) || 0;
+                if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                    const key = `${x},${y},${z}`;
+                    voxMap.set(key, { blockId, metaData, partId: 'txtImport' });
+                }
+            });
+            return voxMap;
+        }
+
+        function normalizeGithubUrl(url) {
+            try {
+                const u = new URL(url);
+                if (u.hostname === 'github.com' && u.pathname.includes('/blob/')) {
+                    const parts = u.pathname.split('/').filter(Boolean);
+                    // github.com/user/repo/blob/branch/path -> raw.githubusercontent.com/user/repo/branch/path
+                    const user = parts[0];
+                    const repo = parts[1];
+                    const branch = parts[3];
+                    const path = parts.slice(4).join('/');
+                    return `https://raw.githubusercontent.com/${user}/${repo}/${branch}/${path}`;
+                }
+                return url;
+            } catch (e) {
+                return url;
+            }
+        }
+
+        async function loadVoxelTxtFromUrl(url, autoStart = false, autoplaySeconds = null) {
+            try {
+                const finalUrl = normalizeGithubUrl(url);
+                addAiChatMessage('system', `正在从URL加载体素TXT: ${finalUrl}`);
+                const resp = await fetch(finalUrl, { cache: 'no-store' });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const text = await resp.text();
+                const voxMap = parseVoxelTxt(text);
+                if (voxMap.size === 0) throw new Error('解析失败或文件为空');
+
+                currentVoxelCoords.clear();
+                voxelProperties.clear();
+                voxMap.forEach((props, key) => {
+                    currentVoxelCoords.add(key);
+                    voxelProperties.set(key, props);
+                });
+
+                if (!loadedModel) {
+                    loadedModel = new THREE.Group();
+                    loadedModel.name = 'TXT Import Placeholder';
+                }
+
+                displayVoxels();
+                updateAgentButtonState();
+                saveAppStateToLocalStorage();
+
+                // 默认加速一点，避免等待过长
+                const range = document.getElementById('drop-speed-range');
+                const label = document.getElementById('drop-speed-label');
+                if (range && label) {
+                    // 自动预设为 2.0x，加快预览
+                    dropSpeedMultiplier = 2.0;
+                    range.value = String(dropSpeedMultiplier);
+                    label.textContent = dropSpeedMultiplier.toFixed(1) + 'x';
+                }
+
+                if (autoStart) {
+                    startVoxelDropAnimation(autoplaySeconds);
+                }
+
+                addAiChatMessage('system', `体素TXT加载完成，共 ${voxMap.size} 个方块。`);
+            } catch (err) {
+                console.error('loadVoxelTxtFromUrl error:', err);
+                addAiChatMessage('system', `加载体素TXT失败: ${err.message}`);
+            }
         }
 
 
@@ -1958,6 +2057,18 @@ ${historyString}
             console.log("Initializing application...");
             init(); // Init 3D scene & UI bindings
 
+            // 如果URL提供了体素TXT，优先加载并自动播放
+            if (window.initialVoxelTxtUrl) {
+                try {
+                    await loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
+                    await loadInitialFilesFromServer(true);
+                    console.log('Initialization complete (loaded voxel TXT from URL).');
+                    return;
+                } catch (e) {
+                    console.warn('Failed to load initial voxel TXT URL:', e);
+                }
+            }
+
             // --- 智能加载顺序 ---
             // 1. 优先从命令行传入的存档文件加载
             if (window.initialSaveData) {
@@ -2066,6 +2177,11 @@ ${historyString}
                     init();
                     applySaveData(window.initialSaveData);
                     // AI features will remain locked until a key is entered manually.
+                } else if (window.initialVoxelTxtUrl) {
+                    console.log("Initial voxel TXT URL found, unlocking UI to show animation without API key.");
+                    unlockUI();
+                    init();
+                    loadVoxelTxtFromUrl(window.initialVoxelTxtUrl, true, window.initialAutoplaySeconds || 4);
                 }
             }
 
@@ -2376,11 +2492,19 @@ ${historyString}
 def index():
     """提供主HTML页面内容。"""
     # 将服务器端验证的密钥和状态传递给前端模板
+    # 解析自动播放秒数
+    try:
+        initial_autoplay_seconds = int(request.args.get('autoplay_seconds', 4))
+    except Exception:
+        initial_autoplay_seconds = 4
+
     return render_template_string(
         HTML_CONTENT,
         api_key_from_file=API_KEY_FROM_FILE if API_KEY_VALIDATED else '',
         is_key_pre_validated=API_KEY_VALIDATED,
-        initial_save_data=INITIAL_SAVE_DATA
+        initial_save_data=INITIAL_SAVE_DATA,
+        initial_voxel_txt_url=request.args.get('voxel_txt_url', ''),
+        initial_autoplay_seconds=initial_autoplay_seconds
     )
 
 @app.route('/api/files')
