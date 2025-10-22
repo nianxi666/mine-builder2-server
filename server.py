@@ -171,6 +171,8 @@ HTML_CONTENT = """
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #6b7280; }
         .sparkle-button::before { content: '✨'; position: absolute; top: -5px; right: -5px; animation: sparkle 1.5s infinite; }
         @keyframes sparkle { 0%, 100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.5); opacity: 1; } }
+        .magic-effect-playing { animation: magicPulse 0.8s ease-in-out infinite alternate; }
+        @keyframes magicPulse { from { box-shadow: 0 0 5px #8b5cf6; } to { box-shadow: 0 0 20px #8b5cf6, 0 0 40px #8b5cf6; } }
     </style>
 </head>
 <body>
@@ -236,7 +238,20 @@ HTML_CONTENT = """
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">编辑体素</h3>
                 <button id="delete-selection-btn" class="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5 disabled:opacity-50 disabled:cursor-not-allowed" disabled>删除选中</button>
                 <button id="material-inventory-btn" class="bg-purple-600 hover:bg-purple-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5" disabled>选择材质</button>
-                <button id="apply-material-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50 disabled:cursor-not-allowed" disabled>应用到选中</button>
+                
+                <div class="mb-1.5">
+                    <label for="magic-effect-select" class="block text-xs font-medium text-gray-400 mb-1">魔法特效</label>
+                    <select id="magic-effect-select" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-xs" disabled>
+                        <option value="sparkle">✨ 闪烁粒子</option>
+                        <option value="ripple">🌊 能量涟漪</option>
+                        <option value="glow">💫 发光脉冲</option>
+                        <option value="spiral">🌀 螺旋能量</option>
+                        <option value="explosion">💥 爆炸碎裂</option>
+                        <option value="dissolve">🔄 溶解重构</option>
+                    </select>
+                </div>
+                
+                <button id="apply-material-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50 disabled:cursor-not-allowed" disabled>🪄 魔法应用材质</button>
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
@@ -384,6 +399,497 @@ HTML_CONTENT = """
         let agentAbortController = null;
         let agentCurrentPartIndex = 0;
         let agentOverallAnalysis = "";
+
+        // --- Magic Effects System ---
+        const MAGIC_EFFECTS = {
+            SPARKLE: 'sparkle',
+            RIPPLE: 'ripple', 
+            GLOW: 'glow',
+            SPIRAL: 'spiral',
+            EXPLOSION: 'explosion',
+            DISSOLVE: 'dissolve'
+        };
+        
+        let currentMagicEffect = MAGIC_EFFECTS.SPARKLE;
+        let isPlayingMagicEffect = false;
+
+        // ====================================================================
+        // Magic Effects Implementation
+        // ====================================================================
+
+        /**
+         * 为体素坐标播放魔法特效
+         */
+        async function playMagicEffectForVoxels(voxelCoords, effectType, newMaterial) {
+            if (isPlayingMagicEffect) return;
+            isPlayingMagicEffect = true;
+
+            // 添加视觉指示器
+            const applyBtn = document.getElementById('apply-material-btn');
+            const magicSelect = document.getElementById('magic-effect-select');
+            applyBtn.classList.add('magic-effect-playing');
+            magicSelect.classList.add('magic-effect-playing');
+            updateSelectionUI();
+
+            const effectDuration = 1500; // 1.5秒特效时间
+            const effectGroup = new THREE.Group();
+            scene.add(effectGroup);
+
+            const coordsArray = Array.from(voxelCoords);
+            
+            try {
+                switch (effectType) {
+                    case MAGIC_EFFECTS.SPARKLE:
+                        await playSparkleEffect(effectGroup, coordsArray, effectDuration);
+                        break;
+                    case MAGIC_EFFECTS.RIPPLE:
+                        await playRippleEffect(effectGroup, coordsArray, effectDuration);
+                        break;
+                    case MAGIC_EFFECTS.GLOW:
+                        await playGlowEffect(effectGroup, coordsArray, effectDuration, newMaterial);
+                        break;
+                    case MAGIC_EFFECTS.SPIRAL:
+                        await playSpiralEffect(effectGroup, coordsArray, effectDuration);
+                        break;
+                    case MAGIC_EFFECTS.EXPLOSION:
+                        await playExplosionEffect(effectGroup, coordsArray, effectDuration);
+                        break;
+                    case MAGIC_EFFECTS.DISSOLVE:
+                        await playDissolveEffect(effectGroup, coordsArray, effectDuration, newMaterial);
+                        break;
+                    default:
+                        await playSparkleEffect(effectGroup, coordsArray, effectDuration);
+                        break;
+                }
+            } finally {
+                // 清理特效对象
+                scene.remove(effectGroup);
+                effectGroup.children.forEach(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(m => m.dispose());
+                        } else {
+                            child.material.dispose();
+                        }
+                    }
+                });
+                
+                // 移除视觉指示器
+                const applyBtn = document.getElementById('apply-material-btn');
+                const magicSelect = document.getElementById('magic-effect-select');
+                applyBtn.classList.remove('magic-effect-playing');
+                magicSelect.classList.remove('magic-effect-playing');
+                
+                isPlayingMagicEffect = false;
+                updateSelectionUI();
+            }
+        }
+
+        /**
+         * 闪烁特效 - 金色粒子从体素中心向外发射
+         */
+        async function playSparkleEffect(effectGroup, coordsArray, duration) {
+            const particles = [];
+            const particleGeometry = new THREE.SphereGeometry(0.02, 8, 6);
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const centerX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const centerY = (y + 0.5) * VOXEL_SIZE;
+                const centerZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                // 为每个体素创建多个粒子
+                for (let i = 0; i < 12; i++) {
+                    const particleMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(0.15, 1, 0.7 + Math.random() * 0.3),
+                        transparent: true,
+                        opacity: 1
+                    });
+                    
+                    const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+                    particle.position.set(centerX, centerY, centerZ);
+                    
+                    const angle = (i / 12) * Math.PI * 2;
+                    const speed = 0.3 + Math.random() * 0.2;
+                    particle.userData = {
+                        velocity: new THREE.Vector3(
+                            Math.cos(angle) * speed,
+                            Math.random() * 0.2 + 0.1,
+                            Math.sin(angle) * speed
+                        ),
+                        life: 1.0
+                    };
+                    
+                    particles.push(particle);
+                    effectGroup.add(particle);
+                }
+            });
+
+            // 动画循环
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                particles.forEach(particle => {
+                    if (particle.userData.life <= 0) return;
+                    
+                    // 更新位置
+                    particle.position.add(particle.userData.velocity.clone().multiplyScalar(0.02));
+                    
+                    // 重力和衰减
+                    particle.userData.velocity.y -= 0.01;
+                    particle.userData.life -= 0.015;
+                    
+                    // 更新透明度和大小
+                    particle.material.opacity = Math.max(0, particle.userData.life);
+                    const scale = 0.5 + particle.userData.life * 0.5;
+                    particle.scale.setScalar(scale);
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 涟漪特效 - 从体素中心向外扩散的能量波
+         */
+        async function playRippleEffect(effectGroup, coordsArray, duration) {
+            const rings = [];
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const centerX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const centerY = (y + 0.5) * VOXEL_SIZE;
+                const centerZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                // 创建多层能量环
+                for (let i = 0; i < 3; i++) {
+                    const ringGeometry = new THREE.RingGeometry(0.01, 0.05, 16);
+                    const ringMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(0.6, 1, 0.8),
+                        transparent: true,
+                        opacity: 0.8,
+                        side: THREE.DoubleSide
+                    });
+                    
+                    const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+                    ring.position.set(centerX, centerY, centerZ);
+                    ring.rotation.x = Math.random() * Math.PI * 2;
+                    ring.rotation.y = Math.random() * Math.PI * 2;
+                    ring.userData = {
+                        delay: i * 200,
+                        maxScale: 3 + Math.random() * 2
+                    };
+                    
+                    rings.push(ring);
+                    effectGroup.add(ring);
+                }
+            });
+
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                rings.forEach(ring => {
+                    const ringProgress = Math.max(0, (elapsed - ring.userData.delay) / (duration - ring.userData.delay));
+                    if (ringProgress <= 0) return;
+                    
+                    const scale = ringProgress * ring.userData.maxScale;
+                    ring.scale.setScalar(scale);
+                    ring.material.opacity = Math.max(0, 0.8 * (1 - ringProgress));
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 发光特效 - 体素整体发光并逐渐转换为新材质
+         */
+        async function playGlowEffect(effectGroup, coordsArray, duration, newMaterial) {
+            const glowMeshes = [];
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 1.2, VOXEL_SIZE * 1.2, VOXEL_SIZE * 1.2);
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const posX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const posY = (y + 0.5) * VOXEL_SIZE;
+                const posZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color().setHSL(0.8, 1, 0.5),
+                    transparent: true,
+                    opacity: 0.6
+                });
+                
+                const glowMesh = new THREE.Mesh(baseVoxelGeometry, glowMaterial);
+                glowMesh.position.set(posX, posY, posZ);
+                glowMesh.userData = {
+                    originalColor: glowMaterial.color.clone(),
+                    targetColor: newMaterial ? new THREE.Color(TEXTURE_KEY_TO_COLOR_MAP[newMaterial.name] || 0xffffff) : new THREE.Color(0xffffff)
+                };
+                
+                glowMeshes.push(glowMesh);
+                effectGroup.add(glowMesh);
+            });
+
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                glowMeshes.forEach(mesh => {
+                    // 脉冲效果
+                    const pulse = 1 + Math.sin(progress * Math.PI * 8) * 0.2;
+                    mesh.scale.setScalar(pulse);
+                    
+                    // 颜色过渡
+                    mesh.material.color.lerpColors(
+                        mesh.userData.originalColor,
+                        mesh.userData.targetColor,
+                        progress
+                    );
+                    
+                    // 透明度变化
+                    mesh.material.opacity = 0.6 * (1 - progress * 0.8);
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 螺旋特效 - 能量螺旋围绕体素旋转
+         */
+        async function playSpiralEffect(effectGroup, coordsArray, duration) {
+            const spirals = [];
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const centerX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const centerY = (y + 0.5) * VOXEL_SIZE;
+                const centerZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                for (let i = 0; i < 8; i++) {
+                    const orbGeometry = new THREE.SphereGeometry(0.03, 8, 6);
+                    const orbMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(0.9, 1, 0.7),
+                        transparent: true,
+                        opacity: 0.8
+                    });
+                    
+                    const orb = new THREE.Mesh(orbGeometry, orbMaterial);
+                    orb.userData = {
+                        center: new THREE.Vector3(centerX, centerY, centerZ),
+                        angle: (i / 8) * Math.PI * 2,
+                        height: i * 0.02
+                    };
+                    
+                    spirals.push(orb);
+                    effectGroup.add(orb);
+                }
+            });
+
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                spirals.forEach(orb => {
+                    const time = progress * Math.PI * 4;
+                    const radius = 0.15 * (1 + Math.sin(progress * Math.PI));
+                    
+                    orb.position.x = orb.userData.center.x + Math.cos(orb.userData.angle + time) * radius;
+                    orb.position.y = orb.userData.center.y + orb.userData.height + Math.sin(progress * Math.PI * 2) * 0.1;
+                    orb.position.z = orb.userData.center.z + Math.sin(orb.userData.angle + time) * radius;
+                    
+                    orb.material.opacity = 0.8 * (1 - progress);
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 爆炸特效 - 体素爆裂成碎片
+         */
+        async function playExplosionEffect(effectGroup, coordsArray, duration) {
+            const fragments = [];
+            const fragmentGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.2, VOXEL_SIZE * 0.2, VOXEL_SIZE * 0.2);
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const centerX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const centerY = (y + 0.5) * VOXEL_SIZE;
+                const centerZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                // 创建多个碎片
+                for (let i = 0; i < 8; i++) {
+                    const fragmentMaterial = new THREE.MeshBasicMaterial({
+                        color: new THREE.Color().setHSL(Math.random(), 1, 0.5),
+                        transparent: true,
+                        opacity: 1
+                    });
+                    
+                    const fragment = new THREE.Mesh(fragmentGeometry, fragmentMaterial);
+                    fragment.position.set(
+                        centerX + (Math.random() - 0.5) * VOXEL_SIZE * 0.5,
+                        centerY + (Math.random() - 0.5) * VOXEL_SIZE * 0.5,
+                        centerZ + (Math.random() - 0.5) * VOXEL_SIZE * 0.5
+                    );
+                    
+                    fragment.userData = {
+                        velocity: new THREE.Vector3(
+                            (Math.random() - 0.5) * 0.8,
+                            Math.random() * 0.4 + 0.2,
+                            (Math.random() - 0.5) * 0.8
+                        ),
+                        angularVelocity: new THREE.Vector3(
+                            (Math.random() - 0.5) * 0.2,
+                            (Math.random() - 0.5) * 0.2,
+                            (Math.random() - 0.5) * 0.2
+                        )
+                    };
+                    
+                    fragments.push(fragment);
+                    effectGroup.add(fragment);
+                }
+            });
+
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                fragments.forEach(fragment => {
+                    // 更新位置
+                    fragment.position.add(fragment.userData.velocity.clone().multiplyScalar(0.03));
+                    
+                    // 重力
+                    fragment.userData.velocity.y -= 0.015;
+                    
+                    // 旋转
+                    fragment.rotation.x += fragment.userData.angularVelocity.x;
+                    fragment.rotation.y += fragment.userData.angularVelocity.y;
+                    fragment.rotation.z += fragment.userData.angularVelocity.z;
+                    
+                    // 淡出
+                    fragment.material.opacity = Math.max(0, 1 - progress);
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 溶解特效 - 体素逐渐溶解并重建为新材质
+         */
+        async function playDissolveEffect(effectGroup, coordsArray, duration, newMaterial) {
+            const dissolveMeshes = [];
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+            
+            coordsArray.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const posX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                const posY = (y + 0.5) * VOXEL_SIZE;
+                const posZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+
+                // 当前体素的材质
+                const currentProps = voxelProperties.get(coordString);
+                const currentTexture = getTextureKeyForVoxel(currentProps?.blockId || 1, currentProps?.metaData || 0, DEFAULT_BLOCK_ID_LIST);
+                const currentColor = TEXTURE_KEY_TO_COLOR_MAP[currentTexture] || 0x888888;
+
+                const dissolveMaterial = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color(currentColor),
+                    transparent: true,
+                    opacity: 1
+                });
+                
+                const dissolveMesh = new THREE.Mesh(baseVoxelGeometry, dissolveMaterial);
+                dissolveMesh.position.set(posX, posY, posZ);
+                dissolveMesh.userData = {
+                    originalColor: new THREE.Color(currentColor),
+                    targetColor: newMaterial ? new THREE.Color(TEXTURE_KEY_TO_COLOR_MAP[newMaterial.name] || 0xffffff) : new THREE.Color(0xffffff)
+                };
+                
+                dissolveMeshes.push(dissolveMesh);
+                effectGroup.add(dissolveMesh);
+            });
+
+            const startTime = Date.now();
+            const animate = () => {
+                const elapsed = Date.now() - startTime;
+                const progress = elapsed / duration;
+                
+                if (progress >= 1) return;
+
+                dissolveMeshes.forEach(mesh => {
+                    if (progress < 0.5) {
+                        // 溶解阶段
+                        const dissolveProgress = progress * 2;
+                        mesh.material.opacity = 1 - dissolveProgress;
+                        mesh.scale.setScalar(1 - dissolveProgress * 0.3);
+                        mesh.position.y += Math.sin(dissolveProgress * Math.PI) * 0.01;
+                    } else {
+                        // 重建阶段
+                        const buildProgress = (progress - 0.5) * 2;
+                        mesh.material.opacity = buildProgress;
+                        mesh.scale.setScalar(0.7 + buildProgress * 0.3);
+                        mesh.material.color.lerpColors(
+                            mesh.userData.originalColor,
+                            mesh.userData.targetColor,
+                            buildProgress
+                        );
+                    }
+                });
+
+                requestAnimationFrame(animate);
+            };
+            
+            animate();
+            await sleep(duration);
+        }
+
+        /**
+         * 工具函数：异步延迟
+         */
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
 
         // ====================================================================
         // NEW: Automated Loading and Data Processing
@@ -1053,9 +1559,16 @@ HTML_CONTENT = """
             }
         }
 
-        function handleApplyMaterialToSelection() {
-            if (selectedVoxelCoords.size > 0 && selectedMaterial) {
-                selectedVoxelCoords.forEach(coord => {
+        async function handleApplyMaterialToSelection() {
+            if (selectedVoxelCoords.size > 0 && selectedMaterial && !isPlayingMagicEffect) {
+                // 创建一个要应用材质的体素坐标副本
+                const coordsToApply = new Set(selectedVoxelCoords);
+                
+                // 播放魔法特效
+                await playMagicEffectForVoxels(coordsToApply, currentMagicEffect, selectedMaterial);
+                
+                // 特效播放完毕后应用材质
+                coordsToApply.forEach(coord => {
                     if (currentVoxelCoords.has(coord)) {
                         const currentProps = voxelProperties.get(coord);
                         voxelProperties.set(coord, {
@@ -1065,6 +1578,8 @@ HTML_CONTENT = """
                         });
                     }
                 });
+                
+                // 重新显示体素以显示新材质
                 displayVoxels();
                 saveAppStateToLocalStorage(); // 保存状态
             }
@@ -1163,9 +1678,12 @@ HTML_CONTENT = """
 
         function updateSelectionUI() {
             const hasSelection = selectedVoxelCoords.size > 0;
-            const canApplyMaterial = hasSelection && !!selectedMaterial;
-            document.getElementById('delete-selection-btn').disabled = !hasSelection;
+            const canApplyMaterial = hasSelection && !!selectedMaterial && !isPlayingMagicEffect;
+            document.getElementById('delete-selection-btn').disabled = !hasSelection || isPlayingMagicEffect;
             document.getElementById('apply-material-btn').disabled = !canApplyMaterial;
+            document.getElementById('magic-effect-select').disabled = isPlayingMagicEffect;
+            document.getElementById('material-inventory-btn').disabled = isPlayingMagicEffect;
+            
             const partItems = document.querySelectorAll('#model-parts-list li');
             partItems.forEach(item => {
                 if (item.dataset.uuid === selectedPartId) {
@@ -1556,11 +2074,20 @@ ${historyString}
                         if (targetMaterial) {
                             const lastMaterialName = targetMaterial.name;
                             const reasoning = actionResult.reasoning ? `_reasoning: ${actionResult.reasoning}_` : "";
+                            
+                            // AI代理随机选择魔法特效，增加多样性
+                            const effectTypes = Object.values(MAGIC_EFFECTS);
+                            const randomEffect = effectTypes[Math.floor(Math.random() * effectTypes.length)];
+                            const previousEffect = currentMagicEffect;
+                            currentMagicEffect = randomEffect;
+                            
                             addAiChatMessage('ai', `**应用**: 为 **${part.name}** 应用 **${targetMaterial.name}**。${reasoning}`);
                             selectPartProgrammatically(part.uuid);
                             selectedMaterial = targetMaterial;
-                            handleApplyMaterialToSelection();
-                            await sleep(1500);
+                            await handleApplyMaterialToSelection();
+                            
+                            // 恢复原来的特效设置
+                            currentMagicEffect = previousEffect;
 
                             // 简化审核，信任AI的“感觉”
                             addAiChatMessage('system', `✅ 应用完成`);
@@ -1739,7 +2266,7 @@ ${historyString}
             apiKeyModal.classList.add('hidden');
             mainContainer.classList.remove('opacity-20', 'pointer-events-none');
 
-            document.querySelectorAll('button, input, textarea').forEach(el => {
+            document.querySelectorAll('button, input, textarea, select').forEach(el => {
                 el.disabled = false;
             });
             // Re-disable buttons that should be initially disabled
@@ -1895,6 +2422,13 @@ ${historyString}
             document.getElementById('export-txt-btn').addEventListener('click', handleExportToTxt);
             document.getElementById('delete-selection-btn').addEventListener('click', handleDeleteSelection);
             document.getElementById('apply-material-btn').addEventListener('click', handleApplyMaterialToSelection);
+            
+            // 魔法特效选择器事件监听器
+            document.getElementById('magic-effect-select').addEventListener('change', (e) => {
+                currentMagicEffect = e.target.value;
+                addAiChatMessage('system', `魔法特效已切换为: ${e.target.selectedOptions[0].textContent}`);
+            });
+            
             const materialPanel = document.getElementById('material-inventory-panel');
             document.getElementById('material-inventory-btn').addEventListener('click', () => materialPanel.classList.remove('hidden'));
             document.getElementById('close-material-panel-btn').addEventListener('click', () => materialPanel.classList.add('hidden'));
@@ -1904,7 +2438,7 @@ ${historyString}
             document.getElementById('ai-panel-close-btn').addEventListener('click', () => aiPanel.classList.add('hidden'));
             document.getElementById('ai-clear-chat-btn').addEventListener('click', () => {
                 document.getElementById('ai-chat-history').innerHTML = '';
-                 addAiChatMessage('system', '欢迎！请按左上角的步骤加载模型、材质和参考图以开始。');
+                 addAiChatMessage('system', '✨ 欢迎使用魔法材质应用系统！请按左上角的步骤加载模型、材质和参考图以开始。现在支持6种魔法特效：闪烁粒子、能量涟漪、发光脉冲、螺旋能量、爆炸碎裂和溶解重构！');
             });
             document.getElementById('ai-send-btn').addEventListener('click', handleAiChatSend);
             document.getElementById('ai-user-input').addEventListener('keypress', (e) => {
@@ -1971,7 +2505,8 @@ ${historyString}
                 is_paused: isAgentPaused,
                 current_part_index: agentCurrentPartIndex,
                 overall_analysis: agentOverallAnalysis,
-                model_name: currentAiModel
+                model_name: currentAiModel,
+                magic_effect: currentMagicEffect
             };
         }
 
@@ -2213,9 +2748,14 @@ ${historyString}
                     agentCurrentPartIndex = saveData.agent_state.current_part_index || 0;
                     agentOverallAnalysis = saveData.agent_state.overall_analysis || '';
                     currentAiModel = saveData.agent_state.model_name || FLASH_MODEL_NAME;
+                    currentMagicEffect = saveData.agent_state.magic_effect || MAGIC_EFFECTS.SPARKLE;
                     
                     // 更新UI状态
                     document.getElementById('ai-model-name-display').textContent = currentAiModel;
+                    const magicEffectSelect = document.getElementById('magic-effect-select');
+                    if (magicEffectSelect) {
+                        magicEffectSelect.value = currentMagicEffect;
+                    }
                     
                     if (isAgentRunning || isAgentPaused) {
                         document.getElementById('ai-agent-btn').classList.add('hidden');
