@@ -236,6 +236,14 @@ HTML_CONTENT = """
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">编辑体素</h3>
                 <button id="delete-selection-btn" class="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5 disabled:opacity-50 disabled:cursor-not-allowed" disabled>删除选中</button>
                 <button id="material-inventory-btn" class="bg-purple-600 hover:bg-purple-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5" disabled>选择材质</button>
+                <div class="mb-1.5">
+                    <label for="magic-effect-select" class="block text-xs font-medium text-gray-400 mb-1">魔法特效</label>
+                    <select id="magic-effect-select" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-xs">
+                        <option value="none">无</option>
+                        <option value="fade">淡入淡出</option>
+                        <option value="particles">粒子爆发</option>
+                    </select>
+                </div>
                 <button id="apply-material-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full disabled:opacity-50 disabled:cursor-not-allowed" disabled>应用到选中</button>
             </div>
 
@@ -1055,19 +1063,191 @@ HTML_CONTENT = """
 
         function handleApplyMaterialToSelection() {
             if (selectedVoxelCoords.size > 0 && selectedMaterial) {
-                selectedVoxelCoords.forEach(coord => {
+                const selectedEffect = document.getElementById('magic-effect-select').value;
+                playMaterialTransitionEffect(selectedVoxelCoords, selectedMaterial, selectedEffect);
+            }
+        }
+
+        async function playMaterialTransitionEffect(voxelCoords, newMaterial, effect) {
+            const coordsArray = Array.from(voxelCoords);
+            if (coordsArray.length === 0) return;
+
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+
+            if (effect === 'none') {
+                coordsArray.forEach(coord => {
                     if (currentVoxelCoords.has(coord)) {
                         const currentProps = voxelProperties.get(coord);
-                        voxelProperties.set(coord, {
-                            ...currentProps,
-                            blockId: selectedMaterial.id,
-                            metaData: selectedMaterial.meta,
-                        });
+                        voxelProperties.set(coord, { ...currentProps, blockId: newMaterial.id, metaData: newMaterial.meta });
                     }
                 });
                 displayVoxels();
-                saveAppStateToLocalStorage(); // 保存状态
+                saveAppStateToLocalStorage();
+                return;
             }
+
+            // --- UI Lock ---
+            document.getElementById('apply-material-btn').disabled = true;
+
+            // --- Hide Original Voxels ---
+            voxelContainerGroup.visible = false;
+
+            // --- Temporary Groups ---
+            const animationGroup = new THREE.Group();
+            const backgroundGroup = new THREE.Group();
+            scene.add(animationGroup, backgroundGroup);
+
+            // --- Populate Background (non-selected voxels) ---
+            const backgroundMaterialToInstancesMap = new Map();
+            currentVoxelCoords.forEach(coordString => {
+                if (!voxelCoords.has(coordString)) {
+                    const voxelProps = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                    const textureKey = getTextureKeyForVoxel(voxelProps.blockId, voxelProps.metaData, DEFAULT_BLOCK_ID_LIST);
+                    if (!backgroundMaterialToInstancesMap.has(textureKey)) backgroundMaterialToInstancesMap.set(textureKey, []);
+                    const [x, y, z] = coordString.split(',').map(Number);
+                    const matrix = new THREE.Matrix4().setPosition(-GRID_SIZE/2 + (x+0.5)*VOXEL_SIZE, (y+0.5)*VOXEL_SIZE, -GRID_SIZE/2 + (z+0.5)*VOXEL_SIZE);
+                    backgroundMaterialToInstancesMap.get(textureKey).push({ matrix });
+                }
+            });
+
+            backgroundMaterialToInstancesMap.forEach((instances, textureKey) => {
+                const texture = loadedTextures.get(textureKey);
+                const material = texture ? new THREE.MeshStandardMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[textureKey] || 0xff00ff });
+                const instancedMesh = new THREE.InstancedMesh(baseVoxelGeometry, material, instances.length);
+                instancedMesh.castShadow = true;
+                instances.forEach((d, i) => instancedMesh.setMatrixAt(i, d.matrix));
+                backgroundGroup.add(instancedMesh);
+            });
+
+            // --- Animation Logic ---
+            if (effect === 'fade') {
+                const oldVoxelInfo = coordsArray.map(coord => ({
+                    coord,
+                    props: voxelProperties.get(coord) || DEFAULT_VOXEL_PROPERTIES,
+                    textureKey: getTextureKeyForVoxel((voxelProperties.get(coord) || DEFAULT_VOXEL_PROPERTIES).blockId, (voxelProperties.get(coord) || DEFAULT_VOXEL_PROPERTIES).metaData, DEFAULT_BLOCK_ID_LIST)
+                }));
+                const oldMeshes = oldVoxelInfo.map(info => {
+                    const texture = loadedTextures.get(info.textureKey);
+                    const material = texture ? new THREE.MeshStandardMaterial({ map: texture, transparent: true }) : new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[info.textureKey] || 0xff00ff, transparent: true });
+                    const [x, y, z] = info.coord.split(',').map(Number);
+                    const mesh = new THREE.Mesh(baseVoxelGeometry, material);
+                    mesh.position.set(-GRID_SIZE/2 + (x+0.5)*VOXEL_SIZE, (y+0.5)*VOXEL_SIZE, -GRID_SIZE/2 + (z+0.5)*VOXEL_SIZE);
+                    animationGroup.add(mesh);
+                    return mesh;
+                });
+                await new Promise(resolve => {
+                    const duration = 400; const start = Date.now();
+                    (function animate() {
+                        const t = Math.min(1, (Date.now() - start) / duration);
+                        oldMeshes.forEach(mesh => mesh.material.opacity = 1 - t*t);
+                        if (t < 1) requestAnimationFrame(animate); else resolve();
+                    })();
+                });
+
+                coordsArray.forEach(coord => {
+                    if (currentVoxelCoords.has(coord)) {
+                        const props = voxelProperties.get(coord);
+                        voxelProperties.set(coord, { ...props, blockId: newMaterial.id, metaData: newMaterial.meta });
+                    }
+                });
+                saveAppStateToLocalStorage();
+
+                const newTextureKey = getTextureKeyForVoxel(newMaterial.id, newMaterial.meta, DEFAULT_BLOCK_ID_LIST);
+                const newTexture = loadedTextures.get(newTextureKey);
+                const newMaterialForMesh = newTexture ? new THREE.MeshStandardMaterial({ map: newTexture, transparent: true, opacity: 0 }) : new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[newTextureKey] || 0xff00ff, transparent: true, opacity: 0 });
+                oldMeshes.forEach(mesh => mesh.material = newMaterialForMesh);
+
+                await new Promise(resolve => {
+                    const duration = 400; const start = Date.now();
+                    (function animate() {
+                        const t = Math.min(1, (Date.now() - start) / duration);
+                        oldMeshes.forEach(mesh => mesh.material.opacity = 1 - (1-t)*(1-t));
+                        if (t < 1) requestAnimationFrame(animate); else resolve();
+                    })();
+                });
+            } else if (effect === 'particles') {
+                const PARTICLE_COUNT = 30;
+                const DURATION = 800;
+
+                const oldVoxelInfo = coordsArray.map(coord => {
+                     const [x, y, z] = coord.split(',').map(Number);
+                     const props = voxelProperties.get(coord) || DEFAULT_VOXEL_PROPERTIES;
+                     const textureKey = getTextureKeyForVoxel(props.blockId, props.metaData, DEFAULT_BLOCK_ID_LIST);
+                     const color = TEXTURE_KEY_TO_COLOR_MAP[textureKey] || 0xffffff;
+                     return {
+                        center: new THREE.Vector3(-GRID_SIZE/2+(x+0.5)*VOXEL_SIZE, (y+0.5)*VOXEL_SIZE, -GRID_SIZE/2+(z+0.5)*VOXEL_SIZE),
+                        color: new THREE.Color(color)
+                     };
+                });
+
+                // Create one particle system per old voxel
+                const particleSystems = oldVoxelInfo.map(info => {
+                    const geometry = new THREE.BufferGeometry();
+                    const positions = new Float32Array(PARTICLE_COUNT * 3);
+                    const velocities = new Float32Array(PARTICLE_COUNT * 3);
+
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        positions.set([info.center.x, info.center.y, info.center.z], i * 3);
+                        velocities.set([ (Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.8 ], i * 3);
+                    }
+                    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                    geometry.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+
+                    const material = new THREE.PointsMaterial({
+                        color: info.color,
+                        size: VOXEL_SIZE / 4,
+                        transparent: true,
+                        opacity: 1,
+                        sizeAttenuation: true
+                    });
+
+                    const points = new THREE.Points(geometry, material);
+                    animationGroup.add(points);
+                    return points;
+                });
+
+
+                await new Promise(resolve => {
+                    const start = Date.now();
+                    (function animate() {
+                        const elapsed = Date.now() - start;
+                        const t = Math.min(1, elapsed / DURATION);
+
+                        particleSystems.forEach(points => {
+                            const positions = points.geometry.attributes.position.array;
+                            const velocities = points.geometry.attributes.velocity.array;
+                            for (let i = 0; i < positions.length; i += 3) {
+                                positions[i] += velocities[i] * t * (VOXEL_SIZE/2);
+                                positions[i+1] += velocities[i+1] * t * (VOXEL_SIZE/2);
+                                positions[i+2] += velocities[i+2] * t * (VOXEL_SIZE/2);
+                            }
+                            points.geometry.attributes.position.needsUpdate = true;
+                            points.material.opacity = 1 - t*t;
+                        });
+
+                        if (t < 1) requestAnimationFrame(animate); else resolve();
+                    })();
+                });
+
+                coordsArray.forEach(coord => {
+                    if (currentVoxelCoords.has(coord)) {
+                        const props = voxelProperties.get(coord);
+                        voxelProperties.set(coord, { ...props, blockId: newMaterial.id, metaData: newMaterial.meta });
+                    }
+                });
+                saveAppStateToLocalStorage();
+            }
+
+            // --- Cleanup ---
+            scene.remove(animationGroup, backgroundGroup);
+            animationGroup.children.forEach(c => { c.geometry.dispose(); if(Array.isArray(c.material)) c.material.forEach(m=>m.dispose()); else c.material.dispose(); });
+            backgroundGroup.children.forEach(c => { if(Array.isArray(c.material)) c.material.forEach(m=>m.dispose()); else c.material.dispose(); });
+            baseVoxelGeometry.dispose(); // Dispose shared geometry at the end
+
+            // --- Restore UI ---
+            displayVoxels();
+            voxelContainerGroup.visible = true;
+            updateSelectionUI();
         }
 
         function unhideAllParts() {
