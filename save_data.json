@@ -1,0 +1,8 @@
+{
+    "voxel_data": {
+        "0,0,0": { "blockId": 1, "metaData": 0 },
+        "1,0,0": { "blockId": 2, "metaData": 0 },
+        "0,1,0": { "blockId": 3, "metaData": 0 },
+        "0,0,1": { "blockId": 4, "metaData": 0 }
+    }
+}

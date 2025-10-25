@@ -1,3 +1,17 @@
+import os
+import logging
+import webbrowser
+import threading
+from flask import Flask, render_template_string
+
+# --- 配置 ---
+PORT = 5000
+
+# --- Flask 应用初始化 ---
+app = Flask(__name__)
+
+# --- HTML/JavaScript 前端内容 ---
+HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -267,7 +281,7 @@
                     }
                     const currentLine = lines[lineIndex];
                     if (charIndex < currentLine.length) { aiOutput.innerHTML += currentLine.charAt(charIndex); charIndex++; aiOutputContainer.scrollTop = aiOutputContainer.scrollHeight; setTimeout(typeChar, 20); }
-                    else { aiOutput.innerHTML += '\n'; lineIndex++; charIndex = 0; setTimeout(typeChar, 200); }
+                    else { aiOutput.innerHTML += '\\n'; lineIndex++; charIndex = 0; setTimeout(typeChar, 200); }
                 }
                 typeChar();
             }
@@ -682,3 +696,30 @@
     </script>
 </body>
 </html>
+"""
+
+# --- Flask 路由 ---
+@app.route('/')
+def index():
+    """提供主HTML页面内容。"""
+    return render_template_string(HTML_CONTENT)
+
+# --- 主程序入口 ---
+def main():
+    """主函数，用于设置并运行Web服务器。"""
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    print("\\n" + "="*70)
+    print("🚀 AI 建筑生成器 V6 (元素魔法)")
+    print(f"服务器正在 http://127.0.0.1:{PORT} 上运行")
+    print("="*70 + "\\n")
+
+    # 在新线程中延迟打开浏览器
+    url = f"http://127.0.0.1:{PORT}"
+    threading.Timer(1.25, lambda: webbrowser.open(url)).start()
+
+    # 启动 Flask 服务器
+    app.run(host='0.0.0.0', port=PORT, debug=False)
+
+if __name__ == '__main__':
+    main()
