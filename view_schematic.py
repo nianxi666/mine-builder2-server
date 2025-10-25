@@ -1,835 +1,684 @@
-#!/usr/bin/env python3
-"""
-view_schematic.py - 查看 Minecraft 建筑图纸/存档的简易查看器
-支持加载材质包、存档、方块ID字典，并保留模型部件信息
-"""
-
-import os
-import json
-import base64
-import zipfile
-import tempfile
-import logging
-import argparse
-from flask import Flask, render_template_string, jsonify, send_file
-
-# --- 配置 ---
-PORT = 5001
-INPUT_DIR = "input"
-SCHEMATIC_FILE = None  # 将通过命令行参数或自动扫描设置
-
-# --- 日志设置 ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [VIEW_SCHEMATIC] - %(levelname)s - %(message)s')
-
-# --- Flask 应用初始化 ---
-app = Flask(__name__)
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
-# --- 辅助函数 ---
-
-def find_first_file(directory, extensions):
-    """在指定目录中查找第一个具有给定扩展名的文件"""
-    if not os.path.isdir(directory):
-        logging.warning(f"目录 '{directory}' 不存在")
-        return None
-    logging.info(f"正在扫描目录 '{directory}'，查找文件类型: {extensions}")
-    for filename in sorted(os.listdir(directory)):
-        if any(filename.lower().endswith(ext) for ext in extensions):
-            path = os.path.join(directory, filename)
-            logging.info(f"找到文件: {path}")
-            return path
-    logging.warning(f"在 '{directory}' 中未找到类型为 {extensions} 的文件")
-    return None
-
-def read_file_as_base64(filepath):
-    """读取文件并将其内容作为 Base64 编码的字符串返回"""
-    if not filepath or not os.path.exists(filepath):
-        return None
-    try:
-        with open(filepath, "rb") as f:
-            return base64.b64encode(f.read()).decode('utf-8')
-    except Exception as e:
-        logging.error(f"无法读取文件 {filepath}: {e}")
-        return None
-
-def load_schematic_file(filepath):
-    """加载存档/图纸文件"""
-    try:
-        if filepath.endswith('.zip'):
-            # 加载ZIP格式的存档文件
-            with zipfile.ZipFile(filepath, 'r') as zipf:
-                with zipf.open('save_data.json') as f:
-                    data = json.load(f)
-                    logging.info(f"成功加载存档文件: {filepath}")
-                    return data
-        elif filepath.endswith('.json'):
-            # 直接加载JSON格式
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                logging.info(f"成功加载JSON文件: {filepath}")
-                return data
-        else:
-            logging.error(f"不支持的文件格式: {filepath}")
-            return None
-    except Exception as e:
-        logging.error(f"加载存档文件失败: {e}")
-        return None
-
-# --- HTML 前端 ---
-HTML_CONTENT = """
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>建筑图纸查看器</title>
+    <title>AI 建筑生成器 V6 (元素魔法)</title>
+    
+    <!-- 1. 加载 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- 2. 加载 Three.js 核心库 -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    
+    <!-- 3. 加载 OrbitControls -->
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+
     <style>
-        body { 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #f3f4f6; 
-            overflow: hidden; 
-            margin: 0; 
-            padding: 0; 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        body, html { margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #87CEEB; }
+        canvas { display: block; }
+        #loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: #87CEEB; display: flex; justify-content: center; align-items: center; font-size: 1.5rem; color: white; z-index: 100; }
+        #ai-output .cursor { display: inline-block; width: 10px; height: 1.2em; background-color: #4ade80; animation: blink 0.7s infinite; margin-left: 2px; vertical-align: middle; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        select {
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 0.5rem center; background-repeat: no-repeat; background-size: 1.5em 1.5em;
+            -webkit-appearance: none; -moz-appearance: none; appearance: none;
         }
-        #main-container { position: relative; width: 100vw; height: 100vh; }
-        #mount { width: 100%; height: 100%; display: block; }
-        .panel {
-            background: rgba(17, 24, 39, 0.9);
-            backdrop-filter: blur(10px);
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        .btn {
-            transition: all 0.3s ease;
-            border-radius: 8px;
-            font-weight: 600;
-        }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
-        .btn:active { transform: translateY(0); }
-        #loading { 
-            position: fixed; 
-            top: 50%; 
-            left: 50%; 
-            transform: translate(-50%, -50%); 
-            z-index: 1000;
-            background: rgba(17, 24, 39, 0.95);
-            padding: 2rem 3rem;
-            border-radius: 12px;
-            text-align: center;
-        }
-        .spinner {
-            border: 4px solid rgba(255, 255, 255, 0.1);
-            border-left-color: #667eea;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 1rem;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        #ui-container { position: absolute; top: 1rem; left: 1rem; z-index: 10; pointer-events: none; width: 95%; max-width: 500px; }
+        #ui-container > div { pointer-events: auto; }
+        .ui-panel { background-color: rgba(31, 41, 55, 0.85) !important; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+        .ui-log-panel { background-color: rgba(0, 0, 0, 0.7) !important; }
+        #panel-content { transition: all 0.3s ease-in-out; max-height: 1000px; overflow: hidden; }
+        #panel-content.collapsed { max-height: 0; padding-top: 0; padding-bottom: 0; margin-top: 0; opacity: 0; }
+        #toggle-icon { transition: transform 0.3s ease-in-out; }
+        #toggle-icon.collapsed { transform: rotate(-90deg); }
+        /* 滑块样式 */
+        input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; background: #4b5563; border-radius: 5px; outline: none; opacity: 0.7; transition: opacity .2s; }
+        input[type=range]:hover { opacity: 1; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; background: #10b981; border-radius: 50%; cursor: pointer; }
+        input[type=range]::-moz-range-thumb { width: 20px; height: 20px; background: #10b981; border-radius: 50%; cursor: pointer; }
     </style>
 </head>
 <body>
-    <div id="loading">
-        <div class="spinner"></div>
-        <div class="text-lg font-semibold">正在加载建筑图纸...</div>
-    </div>
+    <!-- UI 容器 (V6: 元素魔法 + 密度滑块) -->
+    <div id="ui-container">
+        <div class="mx-auto"> 
+            <h1 class="text-3xl font-bold text-center mb-6 text-white text-shadow-lg">
+                <span class="text-green-400">AI</span> 建筑生成器 V6
+            </h1>
 
-    <div id="main-container">
-        <div id="mount"></div>
-
-        <!-- 左侧控制面板 -->
-        <div class="absolute top-4 left-4 panel p-4 w-72 max-h-[90vh] overflow-y-auto z-10">
-            <h2 class="text-xl font-bold mb-4 text-purple-400">🏗️ 建筑图纸查看器</h2>
-            
-            <div class="mb-4">
-                <h3 class="text-sm font-semibold mb-2 text-gray-300">📁 已加载文件</h3>
-                <div id="file-status" class="text-xs text-gray-400 space-y-1">
-                    <div id="schematic-status">图纸: <span class="text-yellow-400">加载中...</span></div>
-                    <div id="texture-status">材质包: <span class="text-yellow-400">加载中...</span></div>
+            <div class="bg-gray-800 rounded-lg shadow-xl flex flex-col ui-panel">
+                <!-- 可点击的标题栏 -->
+                <div id="panel-toggle-button" class="flex justify-between items-center p-4 cursor-pointer">
+                    <h2 class="text-xl font-semibold text-white">控制面板</h2>
+                    <svg id="toggle-icon" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
                 </div>
-            </div>
 
-            <div class="mb-4 border-t border-gray-700 pt-4">
-                <h3 class="text-sm font-semibold mb-2 text-gray-300">🎬 镜头控制</h3>
-                <div class="grid grid-cols-3 gap-2">
-                    <button onclick="setCameraView('front')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">前</button>
-                    <button onclick="setCameraView('back')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">后</button>
-                    <button onclick="setCameraView('top')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">顶</button>
-                    <button onclick="setCameraView('left')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">左</button>
-                    <button onclick="setCameraView('right')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">右</button>
-                    <button onclick="setCameraView('bottom')" class="btn bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 text-xs">底</button>
-                </div>
-                <button onclick="setCameraView('iso')" class="btn bg-purple-600 hover:bg-purple-700 text-white py-2 px-3 text-xs w-full mt-2">等距视角</button>
-            </div>
+                <!-- 可折叠的内容区域 -->
+                <div id="panel-content" class="px-6 pb-6">
+                    <!-- 1. 建筑动画 -->
+                    <label for="effectSelector" class="block text-sm font-medium text-gray-300 mb-2">1. 建筑动画:</label>
+                    <select id="effectSelector" class="w-full bg-gray-700 border border-gray-600 text-white py-2 px-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-400">
+                        <option value="magic-gradient">渐变 (Gradient)</option>
+                        <option value="vortex">旋涡 (Vortex)</option>
+                        <option value="ripple">波纹 (Ripple)</option>
+                        <option value="rain-down">天降 (Rain Down)</option>
+                        <option value="ground-up">从地升起 (Ground Up)</option>
+                        <option value="layer-scan">逐层扫描 (Layer Scan)</option>
+                        <option value="assemble">组装 (Assemble)</option>
+                        <option value="simple">闪现 (Simple)</option>
+                    </select>
 
-            <div class="mb-4 border-t border-gray-700 pt-4">
-                <h3 class="text-sm font-semibold mb-2 text-gray-300">📸 功能</h3>
-                <button onclick="takeScreenshot()" class="btn bg-green-600 hover:bg-green-700 text-white py-2 px-3 text-xs w-full mb-2">截图</button>
-                <button onclick="toggleWireframe()" class="btn bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-3 text-xs w-full">线框模式</button>
-            </div>
+                    <!-- 2. 魔法主题 (V6) -->
+                    <label for="magicSelector" class="block text-sm font-medium text-gray-300 mb-2 mt-4">2. 魔法主题:</label>
+                    <select id="magicSelector" class="w-full bg-gray-700 border border-gray-600 text-white py-2 px-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-400">
+                        <option value="rune-energy" selected>符文能量 (绿色)</option>
+                        <option value="fire">烈焰 (红色/橙色)</option>
+                        <option value="ice">寒冰 (蓝色/白色)</option>
+                        <option value="shadow">暗影 (紫色)</option>
+                        <option value="none">无 (None)</option>
+                    </select>
 
-            <div class="border-t border-gray-700 pt-4">
-                <h3 class="text-sm font-semibold mb-2 text-gray-300">📊 统计信息</h3>
-                <div class="text-xs text-gray-400 space-y-1">
-                    <div>方块总数: <span id="block-count" class="text-white font-semibold">0</span></div>
-                    <div>部件数量: <span id="part-count" class="text-white font-semibold">0</span></div>
-                    <div>材质数量: <span id="material-count" class="text-white font-semibold">0</span></div>
+                    <!-- 3. 粒子密度 (V6) -->
+                    <div class="flex justify-between items-center mt-4">
+                        <label for="particleSlider" class="block text-sm font-medium text-gray-300">3. 粒子密度:</label>
+                        <span id="particleDensityLabel" class="text-sm text-gray-400">33%</span>
+                    </div>
+                    <input type="range" id="particleSlider" min="0" max="100" value="33" class="w-full mt-2">
+
+                    <button id="startButton" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-4 rounded-lg transition-all duration-300 shadow-lg mt-6 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75">
+                        开始生成
+                    </button>
+                    
+                    <h3 class="text-lg font-semibold mt-6 mb-3 text-white">AI 生成日志:</h3>
+                    <pre id="ai-output-container" class="flex-grow bg-black text-green-400 text-sm p-4 rounded-md overflow-y-auto h-40 font-mono whitespace-pre-wrap ui-log-panel">
+                        <span id="ai-output"></span><span class="cursor"></span>
+                    </pre>
                 </div>
             </div>
         </div>
-
-        <!-- 右侧部件列表 -->
-        <div class="absolute top-4 right-4 panel p-4 w-64 max-h-[90vh] overflow-y-auto z-10">
-            <h3 class="text-lg font-bold mb-3 text-purple-400">🧩 模型部件</h3>
-            <div id="parts-list" class="text-xs text-gray-400">
-                暂无部件信息
-            </div>
-        </div>
     </div>
 
-    <script>
-        // ====================================================================
-        // 全局变量
-        // ====================================================================
-        const VOXEL_RESOLUTION = 32;
-        const GRID_SIZE = 10;
-        const VOXEL_SIZE = GRID_SIZE / VOXEL_RESOLUTION;
+    <!-- 加载提示 -->
+    <div id="loading-overlay">正在加载 3D 场景...</div>
 
-        // Minecraft 方块ID字典 (与原始材质名称映射)
-        const BLOCK_ID_DICT = {{ block_id_dict | tojson }};
+    <!-- 主脚本 -->
+    <script type="module">
+        // 等待库加载
+        document.addEventListener('DOMContentLoaded', init);
+
+        // --- 全局变量 ---
+        let startButton, aiOutput, aiOutputContainer, effectSelector, magicSelector, particleSlider, particleDensityLabel;
+        let panelToggle, panelContent, toggleIcon;
+        let blockGroup, particleSystem;
+        const particles = [];
+        const blockMaterials = {}; // 只存储颜色
+        let isBuilding = false;
+        let currentEffect = 'magic-gradient'; // 默认运动
+        let currentMagicTheme = 'rune-energy'; // 默认魔法 V6
+        let particleDensity = 33; // V6 粒子密度
+        const MAX_PARTICLES_PER_BLOCK = 30; // V6 粒子上限
         
-        // 纹理键到默认颜色的映射 (当材质包中没有对应纹理时使用)
-        const TEXTURE_FALLBACK_COLORS = {
-            'stone': 0x888888,
-            'grass': 0x74b44a,
-            'grass_top': 0x74b44a,
-            'grass_side': 0x90ac50,
-            'dirt': 0x8d6b4a,
-            'cobblestone': 0x7a7a7a,
-            'planks_oak': 0xaf8f58,
-            'planks_spruce': 0x806038,
-            'planks_birch': 0xdace9b,
-            'planks_jungle': 0xac7d5a,
-            'log_oak': 0x685133,
-            'log_spruce': 0x513f27,
-            'brick': 0xa05050,
-            'sand': 0xe3dbac,
-            'gravel': 0x84807b,
-            'gold_block': 0xffff00,
-            'iron_block': 0xd8d8d8,
-            'diamond_block': 0x7dedde,
-            'wool_colored_white': 0xffffff,
-            'wool_colored_red': 0xff0000,
-            'glass': 0xaaddff,
-            'unknown': 0xff00ff
-        };
+        // AI 日志
+        const aiLogBase = [ "初始化 AI 模型...", "分析提示: '建造一个炫酷的 Minecraft 房屋'", "正在解析结构...", "生成方块坐标...", "图纸 (Schematic) 定义:", "  类型: 小型房屋", "  地基: 6x6 (木板)", "  墙体: 4x4 (圆石)", "  屋顶: 6x6 (木台阶)", "总方块数: 88", ];
+        
+        // 房屋图纸
+        const schematicData = [];
+        const MAT_WOOD = 'wood'; const MAT_COBBLE = 'cobble'; const MAT_ROOF = 'roof';
+        for (let x = -3; x <= 2; x++) for (let z = -3; z <= 2; z++) schematicData.push({ x, y: 0.5, z, type: MAT_WOOD }); 
+        for (let y = 1; y <= 2; y++) {
+            for (let x = -3; x <= 2; x++) { schematicData.push({ x, y: y+0.5, z: -3, type: MAT_COBBLE }); schematicData.push({ x, y: y+0.5, z: 2, type: MAT_COBBLE }); }
+            for (let z = -2; z <= 1; z++) { schematicData.push({ x: -3, y: y+0.5, z, type: MAT_COBBLE }); schematicData.push({ x: 2, y: y+0.5, z, type: MAT_COBBLE }); }
+        }
+        for (let x = -3; x <= 2; x++) for (let z = -3; z <= 2; z++) schematicData.push({ x, y: 3.5, z, type: MAT_ROOF });
+        for (let x = -2; x <= 1; x++) for (let z = -2; z <= 1; z++) schematicData.push({ x, y: 4.5, z, type: MAT_ROOF });
 
-        let scene, camera, renderer, controls;
-        let voxelContainerGroup;
-        let loadedTextures = new Map();
-        let schematicData = null;
-        let wireframeMode = false;
 
-        // ====================================================================
-        // 初始化
-        // ====================================================================
-        async function init() {
-            console.log('初始化 3D 场景...');
+        // --- 主初始化函数 ---
+        function init() {
+            // --- 获取 DOM 元素 ---
+            startButton = document.getElementById('startButton');
+            aiOutput = document.getElementById('ai-output');
+            aiOutputContainer = document.getElementById('ai-output-container');
+            effectSelector = document.getElementById('effectSelector');
+            magicSelector = document.getElementById('magicSelector'); 
+            particleSlider = document.getElementById('particleSlider'); // V6
+            particleDensityLabel = document.getElementById('particleDensityLabel'); // V6
+            panelToggle = document.getElementById('panel-toggle-button');
+            panelContent = document.getElementById('panel-content');
+            toggleIcon = document.getElementById('toggle-icon');
+            effectSelector.value = currentEffect;
+            magicSelector.value = currentMagicTheme;
             
-            // 设置 Three.js 场景
-            const mount = document.getElementById('mount');
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a2e);
-            scene.fog = new THREE.Fog(0x1a1a2e, 20, 50);
-
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(GRID_SIZE * 1.2, GRID_SIZE * 1.2, GRID_SIZE * 1.2);
-
-            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+            // --- 场景设置 ---
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 20, 50);
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 10); 
+            const renderer = new THREE.WebGLRenderer({ antialias: true }); 
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-            mount.appendChild(renderer.domElement);
-
-            controls = new THREE.OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-            controls.target.set(0, GRID_SIZE / 2, 0);
-            controls.update();
-
-            // 光照
-            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-            
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            directionalLight.position.set(GRID_SIZE, GRID_SIZE * 2, GRID_SIZE);
-            directionalLight.castShadow = true;
-            directionalLight.shadow.mapSize.width = 2048;
-            directionalLight.shadow.mapSize.height = 2048;
+            renderer.setPixelRatio(window.devicePixelRatio); 
+            document.body.appendChild(renderer.domElement);
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; controls.dampingFactor = 0.05;
+            controls.maxPolarAngle = Math.PI / 2 - 0.05; 
+            controls.minDistance = 2; controls.maxDistance = 60;
+            controls.target.set(0, 0, 0); 
+            const ambientLight = new THREE.AmbientLight(0xcccccc, 0.8);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+            directionalLight.position.set(10, 20, 5);
+            directionalLight.castShadow = true; 
             scene.add(directionalLight);
 
-            // 地面网格
-            const gridHelper = new THREE.GridHelper(GRID_SIZE, VOXEL_RESOLUTION, 0x4a5568, 0x2d3748);
-            scene.add(gridHelper);
-
-            // 地面接受阴影
-            const groundPlane = new THREE.Mesh(
-                new THREE.PlaneGeometry(GRID_SIZE * 2, GRID_SIZE * 2),
-                new THREE.ShadowMaterial({ opacity: 0.3 })
-            );
-            groundPlane.rotation.x = -Math.PI / 2;
-            groundPlane.position.y = -0.01;
-            groundPlane.receiveShadow = true;
-            scene.add(groundPlane);
-
-            // 体素容器
-            voxelContainerGroup = new THREE.Group();
-            scene.add(voxelContainerGroup);
-
-            // 窗口大小调整
-            window.addEventListener('resize', onWindowResize);
-
-            // 开始动画循环
-            animate();
-
-            // 加载数据
-            await loadData();
-        }
-
-        function animate() {
-            requestAnimationFrame(animate);
-            controls.update();
-            renderer.render(scene, camera);
-        }
-
-        function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-
-        // ====================================================================
-        // 数据加载
-        // ====================================================================
-        async function loadData() {
-            try {
-                console.log('从服务器获取数据...');
-                const response = await fetch('/api/data');
-                if (!response.ok) throw new Error(`服务器响应错误: ${response.status}`);
-                
-                const data = await response.json();
-                console.log('接收到数据:', data);
-
-                // 加载材质包
-                if (data.texturePackData) {
-                    document.getElementById('texture-status').innerHTML = '材质包: <span class="text-green-400">✓ 已加载</span>';
-                    await loadTexturePack(data.texturePackData);
-                } else {
-                    document.getElementById('texture-status').innerHTML = '材质包: <span class="text-red-400">✗ 未找到</span>';
-                    console.warn('未找到材质包');
-                }
-
-                // 加载图纸数据
-                if (data.schematicData) {
-                    document.getElementById('schematic-status').innerHTML = '图纸: <span class="text-green-400">✓ 已加载</span>';
-                    schematicData = data.schematicData;
-                    displaySchematic();
-                } else {
-                    document.getElementById('schematic-status').innerHTML = '图纸: <span class="text-red-400">✗ 未找到</span>';
-                    console.error('未找到图纸数据');
-                }
-
-                // 隐藏加载提示
-                document.getElementById('loading').style.display = 'none';
-
-            } catch (error) {
-                console.error('加载数据失败:', error);
-                document.getElementById('loading').innerHTML = 
-                    '<div class="text-red-400 text-lg font-semibold">❌ 加载失败: ' + error.message + '</div>';
+            // --- 纹理和地面 (平坦世界) ---
+            function createPixelTexture(colorData, width = 16, height = 16) {
+                const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+                const context = canvas.getContext('2d');
+                for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { context.fillStyle = colorData(x, y); context.fillRect(x, y, 1, 1); }
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.magFilter = THREE.NearestFilter; texture.minFilter = THREE.NearestFilter;
+                return texture;
             }
-        }
+            function randColor(base, variance) { const c = base + Math.floor((Math.random() - 0.5) * variance); return Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0'); }
+            const grassTopTexture = createPixelTexture(() => `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}`);
+            const dirtTexture = createPixelTexture(() => `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`);
+            const grassSideTexture = createPixelTexture((x, y) => (y < 4) ? `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}` : `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`);
+            const groundSize = 50; 
+            const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const groundBlockMaterials = [ new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassTopTexture }),  new THREE.MeshLambertMaterial({ map: dirtTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }) ];
+            const groundMesh = new THREE.InstancedMesh(blockGeometry, groundBlockMaterials, groundSize * groundSize);
+            const dummy = new THREE.Object3D(); 
+            let index = 0;
+            for (let x = -groundSize / 2; x < groundSize / 2; x++) for (let z = -groundSize / 2; z < groundSize / 2; z++) { dummy.position.set(x + 0.5, -0.5, z + 0.5); dummy.updateMatrix(); groundMesh.setMatrixAt(index++, dummy.matrix); }
+            scene.add(groundMesh);
 
-        async function loadTexturePack(base64Data) {
-            try {
-                console.log('加载材质包...');
-                const binaryString = atob(base64Data);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
+            // --- 云 (平坦世界) ---
+            const cloudGroup = new THREE.Group();
+            const cloudBlockGeo = new THREE.BoxGeometry(1, 1, 1);
+            const cloudMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff }); 
+            for (let i = 0; i < 15; i++) {
+                const cloud = new THREE.Group();
+                for (let j = 0; j < (Math.floor(Math.random() * 6) + 4); j++) {
+                    const block = new THREE.Mesh(cloudBlockGeo, cloudMaterial);
+                    block.position.set((Math.random() - 0.5) * 5, (Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 3);
+                    block.scale.set(Math.random() * 0.5 + 1, Math.random() * 0.5 + 1, Math.random() * 0.5 + 1);
+                    cloud.add(block);
+                }
+                cloud.position.set((Math.random() - 0.5) * groundSize * 1.5, Math.random() * 5 + 20, (Math.random() - 0.5) * groundSize * 1.5);
+                cloudGroup.add(cloud);
+            }
+            scene.add(cloudGroup);
+            
+            // --- 9. AI 建筑 3D 对象 (V6: 只存颜色) ---
+            blockMaterials[MAT_WOOD] = new THREE.Color(0x8b5a2b); 
+            blockMaterials[MAT_COBBLE] = new THREE.Color(0x808080); 
+            blockMaterials[MAT_ROOF] = new THREE.Color(0x6b4423); 
+            blockGroup = new THREE.Group();
+            scene.add(blockGroup);
+
+            // 粒子系统
+            const particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(2000 * 3); const colors = new Float32Array(2000 * 3); const sizes = new Float32Array(2000);
+            for (let i = 0; i < 2000; i++) { sizes[i] = 1; } 
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+            const particleMaterial = new THREE.PointsMaterial({ size: 0.1, sizeAttenuation: true, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+            particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+            particleSystem.visible = false; 
+            scene.add(particleSystem);
+
+            // --- 10. 动画循环 (合并) ---
+            function animate() {
+                requestAnimationFrame(animate);
+                cloudGroup.children.forEach(cloud => {
+                    cloud.position.x += 0.01;
+                    if (cloud.position.x > groundSize) { cloud.position.x = -groundSize; cloud.position.z = (Math.random() - 0.5) * groundSize * 1.5; }
+                });
+                if (particleSystem.visible) updateParticles();
+                controls.update(); 
+                renderer.render(scene, camera);
+            }
+
+            // --- 11. 窗口大小调整 ---
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            // --- 12. 辅助函数 (文本、建筑、特效) ---
+            
+            // 文本打字机
+            function typeText(lines, onFinished) {
+                let lineIndex = 0, charIndex = 0; aiOutput.innerHTML = ''; 
+                startButton.disabled = true; startButton.textContent = '正在生成中...';
+                effectSelector.disabled = true; magicSelector.disabled = true; particleSlider.disabled = true;
+                function typeChar() {
+                    if (lineIndex >= lines.length) {
+                        startButton.disabled = false; startButton.textContent = '重新生成';
+                        effectSelector.disabled = false; magicSelector.disabled = false; particleSlider.disabled = false;
+                        if (onFinished) onFinished(); return;
+                    }
+                    const currentLine = lines[lineIndex];
+                    if (charIndex < currentLine.length) { aiOutput.innerHTML += currentLine.charAt(charIndex); charIndex++; aiOutputContainer.scrollTop = aiOutputContainer.scrollHeight; setTimeout(typeChar, 20); }
+                    else { aiOutput.innerHTML += '\n'; lineIndex++; charIndex = 0; setTimeout(typeChar, 200); }
+                }
+                typeChar();
+            }
+
+            // 建筑动画总路由器 (V6)
+            function animateBuild() {
+                if (isBuilding) return;
+                isBuilding = true;
+                while (blockGroup.children.length > 0) { blockGroup.remove(blockGroup.children[0]); }
+                
+                // V6: 根据魔法主题和密度决定粒子系统是否可见
+                particleSystem.visible = (currentMagicTheme !== 'none' && particleDensity > 0);
+
+                switch (currentEffect) {
+                    case 'layer-scan': startBuild_LayerScan(); break;
+                    case 'ripple': startBuild_Ripple(); break;
+                    default:
+                        // 所有其他特效都走随机序列
+                        startBuildSequence(getAnimationFunction(currentEffect), 30);
+                        break;
+                }
+            }
+
+            // V6: 获取动画函数的帮助器 (无变化)
+            function getAnimationFunction(effectName) {
+                switch (effectName) {
+                    case 'magic-gradient': return animateBlock_MagicGradient;
+                    case 'vortex': return animateBlock_Vortex;
+                    case 'rain-down': return animateBlock_RainDown;
+                    case 'ground-up': return animateBlock_GroundUp;
+                    case 'assemble': return animateBlock_Assemble;
+                    case 'simple':
+                    default: return animateBlock_Simple;
+                }
+            }
+
+            // 通用建筑序列 (随机) (V6)
+            function startBuildSequence(animationFunction, delay) {
+                const shuffledData = [...schematicData].sort(() => Math.random() - 0.5);
+                let blockIndex = 0;
+                function placeNextBlock() {
+                    if (blockIndex >= shuffledData.length) { isBuilding = false; return; }
+                    const blockData = shuffledData[blockIndex];
+                    const baseColor = blockMaterials[blockData.type] || blockMaterials[MAT_COBBLE];
+                    
+                    const block = animationFunction(blockData, baseColor); 
+                    
+                    // V6: 魔法主题函数负责附加特效
+                    applyMagicTheme(block, blockData, currentMagicTheme);
+                    
+                    blockIndex++;
+                    setTimeout(placeNextBlock, delay);
+                }
+                placeNextBlock();
+            }
+
+            // --- V6: 魔法主题应用 ---
+            
+            // V6: 新增 - 魔法主题总控制器
+            function applyMagicTheme(block, blockData, magicTheme) {
+                switch (magicTheme) {
+                    case 'rune-energy':
+                        emitParticles(blockData, 'green');
+                        animateGlow(block, 'green');
+                        break;
+                    case 'fire':
+                        emitParticles(blockData, 'fire');
+                        animateGlow(block, 'fire');
+                        break;
+                    case 'ice':
+                        emitParticles(blockData, 'ice');
+                        animateGlow(block, 'ice');
+                        break;
+                    case 'shadow':
+                        emitParticles(blockData, 'shadow');
+                        animateGlow(block, 'shadow');
+                        break;
+                    case 'none':
+                    default:
+                        // 什么也不做
+                        break;
+                }
+            }
+
+            // V6: 新增 - 奥术光辉动画 (带主题)
+            function animateGlow(block, theme) {
+                // 确保材质是克隆的并且可以发光
+                if (!block.material.clone) return; 
+                block.material = block.material.clone(); 
+                
+                let emissiveColor;
+                switch (theme) {
+                    case 'fire': emissiveColor = 0xff8800; break;
+                    case 'ice': emissiveColor = 0x88ccff; break;
+                    case 'shadow': emissiveColor = 0xcc88ff; break;
+                    case 'green':
+                    default: emissiveColor = 0x88ff88; break;
+                }
+                block.material.emissive = new THREE.Color(emissiveColor);
+                block.material.emissiveIntensity = 0;
+
+                let progress = 0, duration = 800, startTime = Date.now();
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    if (progress < 0.5) { block.material.emissiveIntensity = progress * 2; }
+                    else { block.material.emissiveIntensity = (1 - progress) * 2; }
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                    else { block.material.emissiveIntensity = 0; }
+                }
+                animate();
+            }
+
+            // --- 特效实现 (8种运动) ---
+            // V6: 所有函数现在都创建、添加并返回 block，但不应用魔法
+
+            // 特效 1: 渐变 (Gradient)
+            function animateBlock_MagicGradient(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor, transparent: true, opacity: 0.01 });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                block.position.set(blockData.x, blockData.y, blockData.z);
+                block.scale.set(0.8, 0.8, 0.8);
+                blockGroup.add(block);
+
+                let progress = 0, duration = 1000, startTime = Date.now();
+                const startScale = block.scale.clone();
+                const targetScale = new THREE.Vector3(1, 1, 1);
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    const easedProgress = Math.pow(progress, 2);
+                    block.material.opacity = 0.01 + 0.99 * easedProgress;
+                    block.scale.lerpVectors(startScale, targetScale, easedProgress);
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                    else { block.material.opacity = 1; block.scale.set(1, 1, 1); }
+                }
+                animate();
+                return block;
+            }
+
+            // 特效 2: 旋涡 (Vortex)
+            function animateBlock_Vortex(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                blockGroup.add(block);
+
+                let progress = 0, duration = 800, startTime = Date.now();
+                const startRadius = 10.0, startAngle = Math.random() * Math.PI * 2;
+                const totalRotations = 3 * Math.PI * 2, startY = blockData.y + 5 + Math.random() * 3;
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    const easedProgress = 1 - Math.pow(1 - progress, 3); 
+                    const currentRadius = startRadius * (1 - easedProgress);
+                    const currentAngle = startAngle + totalRotations * easedProgress;
+                    const currentY = startY + (blockData.y - startY) * easedProgress;
+                    block.position.x = blockData.x + currentRadius * Math.cos(currentAngle);
+                    block.position.z = blockData.z + currentRadius * Math.sin(currentAngle);
+                    block.position.y = currentY;
+                    block.rotation.y = currentAngle; 
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                    else { block.rotation.set(0,0,0); block.position.set(blockData.x, blockData.y, blockData.z); }
+                }
+                animate();
+                return block;
+            }
+
+            // 特效 3: 天降 (Rain Down)
+            function animateBlock_RainDown(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                block.position.set(blockData.x, blockData.y + 15, blockData.z); 
+                block.scale.set(1.1, 0.8, 1.1); 
+                blockGroup.add(block);
+                let progress = 0, duration = 500, startTime = Date.now();
+                const startY = block.position.y, targetY = blockData.y;
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    const easedProgress = 1 - Math.pow(1 - progress, 3);
+                    block.position.y = startY + (targetY - startY) * easedProgress;
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                    else { animateBounce(block); }
+                }
+                function animateBounce(b) {
+                    let bounceProgress = 0, bounceDuration = 200, bounceStart = Date.now();
+                    function bounce() {
+                        const elapsed = Date.now() - bounceStart;
+                        bounceProgress = Math.min(1, elapsed / bounceDuration);
+                        const scaleY = 0.8 + 0.2 * Math.abs(Math.sin(bounceProgress * Math.PI));
+                        const scaleXZ = 1.1 - 0.1 * Math.abs(Math.sin(bounceProgress * Math.PI));
+                        b.scale.set(scaleXZ, scaleY, scaleXZ);
+                        if (bounceProgress < 1) { requestAnimationFrame(bounce); }
+                        else { b.scale.set(1, 1, 1); }
+                    }
+                    bounce();
+                }
+                animate();
+                return block;
+            }
+
+            // 特效 4: 从地升起 (Ground Up)
+            function animateBlock_GroundUp(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                block.position.set(blockData.x, -5, blockData.z); 
+                blockGroup.add(block);
+                let progress = 0, duration = 600, startTime = Date.now();
+                const startY = block.position.y, targetY = blockData.y;
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    const easedProgress = 1 - Math.pow(1 - progress, 3);
+                    block.position.y = startY + (targetY - startY) * easedProgress;
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                }
+                animate();
+                return block;
+            }
+
+            // 特效 5: 组装 (Assemble)
+            function animateBlock_Assemble(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                const startX = blockData.x > 0 ? blockData.x + 15 : blockData.x - 15;
+                block.position.set(startX, blockData.y, blockData.z);
+                blockGroup.add(block);
+                let progress = 0, duration = 400, startTime = Date.now();
+                const targetX = blockData.x;
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    const easedProgress = progress * progress; 
+                    block.position.x = startX + (targetX - startX) * easedProgress;
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                }
+                animate();
+                return block;
+            }
+
+            // 特效 6: 闪现 (Simple)
+            function animateBlock_Simple(blockData, baseColor) {
+                const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+                const blockMaterial = new THREE.MeshLambertMaterial({ color: baseColor });
+                const block = new THREE.Mesh(blockGeometry, blockMaterial);
+                block.position.set(blockData.x, blockData.y, blockData.z);
+                block.scale.set(0, 0, 0);
+                blockGroup.add(block);
+                let progress = 0, duration = 100, startTime = Date.now();
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    progress = Math.min(1, elapsed / duration);
+                    block.scale.set(progress, progress, progress);
+                    if (progress < 1) { requestAnimationFrame(animate); }
+                }
+                animate();
+                return block;
+            }
+
+            // --- 特殊序列 (V6: 重构) ---
+            
+            // 特效 7: 逐层扫描 (Layer Scan)
+            function startBuild_LayerScan() {
+                const sortedData = [...schematicData].sort((a, b) => a.y - b.y);
+                const layers = new Map();
+                sortedData.forEach(blockData => { if (!layers.has(blockData.y)) layers.set(blockData.y, []); layers.get(blockData.y).push(blockData); });
+                const layerKeys = Array.from(layers.keys());
+                let layerIndex = 0;
+                function buildNextLayer() {
+                    if (layerIndex >= layerKeys.length) { isBuilding = false; return; }
+                    const currentLayerY = layerKeys[layerIndex];
+                    const blocksInLayer = layers.get(currentLayerY);
+                    blocksInLayer.forEach(blockData => {
+                        const baseColor = blockMaterials[blockData.type] || blockMaterials[MAT_COBBLE];
+                        const block = animateBlock_Simple(blockData, baseColor); // 运动
+                        applyMagicTheme(block, blockData, currentMagicTheme); // 魔法
+                    });
+                    layerIndex++;
+                    setTimeout(buildNextLayer, 300); 
+                }
+                buildNextLayer();
+            }
+
+            // 特效 8: 波纹 (Ripple)
+            function startBuild_Ripple() {
+                const distanceData = schematicData.map(blockData => ({ ...blockData, dist: Math.sqrt(blockData.x * blockData.x + blockData.z * blockData.z) }));
+                distanceData.sort((a, b) => a.dist - b.dist);
+                const ripples = new Map();
+                distanceData.forEach(blockData => { const rippleIndex = Math.floor(blockData.dist); if (!ripples.has(rippleIndex)) ripples.set(rippleIndex, []); ripples.get(rippleIndex).push(blockData); });
+                const rippleKeys = Array.from(ripples.keys()).sort((a, b) => a - b);
+                let rippleIndex = 0;
+                function buildNextRipple() {
+                    if (rippleIndex >= rippleKeys.length) { isBuilding = false; return; }
+                    const currentRippleKey = rippleKeys[rippleIndex];
+                    const blocksInRipple = ripples.get(currentRippleKey);
+                    blocksInRipple.forEach(blockData => {
+                        const baseColor = blockMaterials[blockData.type] || blockMaterials[MAT_COBBLE];
+                        const block = animateBlock_GroundUp(blockData, baseColor); // 运动
+                        applyMagicTheme(block, blockData, currentMagicTheme); // 魔法
+                    });
+                    rippleIndex++;
+                    setTimeout(buildNextRipple, 100); 
+                }
+                buildNextRipple();
+            }
+
+            // --- 粒子系统 (V6: 主题化 + 密度) ---
+            function updateParticles() {
+                const positions = particleSystem.geometry.attributes.position.array, colors = particleSystem.geometry.attributes.color.array, sizes = particleSystem.geometry.attributes.size.array; 
+                for (let i = 0; i < particles.length; i++) {
+                    const p = particles[i]; if (p.life <= 0) continue;
+                    // V6: 自定义重力
+                    p.velocity.y -= p.gravity; 
+                    p.position.add(p.velocity);
+                    p.life -= 0.01; p.opacity = p.life / p.maxLife;
+                    if (p.life <= 0) { positions[i * 3 + 1] = -100; } 
+                    else {
+                        positions[i * 3] = p.position.x; positions[i * 3 + 1] = p.position.y; positions[i * 3 + 2] = p.position.z;
+                        colors[i * 3] = p.color.r * p.opacity; colors[i * 3 + 1] = p.color.g * p.opacity; colors[i * 3 + 2] = p.color.b * p.opacity;
+                        sizes[i] = p.size * p.opacity;
+                    }
+                }
+                particleSystem.geometry.attributes.position.needsUpdate = true;
+                particleSystem.geometry.attributes.color.needsUpdate = true;
+                particleSystem.geometry.attributes.size.needsUpdate = true;
+            }
+
+            function emitParticles(blockData, theme) {
+                // V6: 根据密度计算粒子数量
+                const numToEmit = Math.floor((particleDensity / 100) * MAX_PARTICLES_PER_BLOCK);
+                if (numToEmit === 0) return;
+                
+                let colorBase, velY, life, gravity;
+                // V6: 根据主题设置物理和颜色
+                switch (theme) {
+                    case 'fire':
+                        colorBase = 0xff8800; velY = [0.08, 0.12]; life = [0.6, 1.0]; gravity = 0.0005; // 上升
+                        break;
+                    case 'ice':
+                        colorBase = 0x88ccff; velY = [0.01, 0.05]; life = [1.0, 1.5]; gravity = 0.0015; // 缓慢
+                        break;
+                    case 'shadow':
+                        colorBase = 0xcc88ff; velY = [0.03, 0.08]; life = [1.0, 1.2]; gravity = 0.0008; // 漂浮
+                        break;
+                    case 'green':
+                    default:
+                        colorBase = 0x88ff88; velY = [0.08, 0.12]; life = [0.8, 1.2]; gravity = 0.001; // 经典
+                        break;
                 }
 
-                const zip = await JSZip.loadAsync(bytes);
-                const textureLoader = new THREE.TextureLoader();
-                const texturePromises = [];
-                const texturePathPrefix = 'assets/minecraft/textures/blocks/';
-
-                zip.forEach((relativePath, zipEntry) => {
-                    if (relativePath.startsWith(texturePathPrefix) && 
-                        relativePath.toLowerCase().endsWith('.png') && 
-                        !zipEntry.dir) {
-                        
-                        const textureName = relativePath
-                            .substring(texturePathPrefix.length)
-                            .replace(/\\.png$/i, '');
-                        
-                        if (textureName) {
-                            texturePromises.push(
-                                zipEntry.async('blob').then(blob => {
-                                    const url = URL.createObjectURL(blob);
-                                    return new Promise((resolve) => {
-                                        textureLoader.load(url, (texture) => {
-                                            texture.magFilter = THREE.NearestFilter;
-                                            texture.minFilter = THREE.NearestFilter;
-                                            loadedTextures.set(textureName, texture);
-                                            URL.revokeObjectURL(url);
-                                            resolve();
-                                        }, undefined, (err) => {
-                                            console.error('纹理加载失败:', textureName, err);
-                                            resolve();
-                                        });
-                                    });
-                                })
-                            );
+                for (let i = 0; i < numToEmit; i++) {
+                    let foundParticle = false;
+                    for (let j = 0; j < particles.length; j++) {
+                        if (particles[j].life <= 0) {
+                            const p = particles[j];
+                            p.position.set(blockData.x, blockData.y, blockData.z);
+                            p.velocity.set((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05);
+                            p.color = new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3); 
+                            p.maxLife = p.life = life[0] + Math.random() * (life[1] - life[0]);
+                            p.size = 1 + Math.random() * 2;
+                            p.gravity = gravity; // V6
+                            foundParticle = true; break;
                         }
                     }
-                });
-
-                await Promise.all(texturePromises);
-                console.log(`材质包加载完成，共 ${loadedTextures.size} 个纹理`);
-                document.getElementById('material-count').textContent = loadedTextures.size;
-
-            } catch (error) {
-                console.error('加载材质包失败:', error);
-            }
-        }
-
-        // ====================================================================
-        // 显示图纸
-        // ====================================================================
-        function displaySchematic() {
-            if (!schematicData || !schematicData.voxel_data) {
-                console.error('图纸数据无效');
-                return;
-            }
-
-            console.log('开始显示图纸...');
-
-            // 清除现有体素
-            while (voxelContainerGroup.children.length > 0) {
-                const child = voxelContainerGroup.children[0];
-                voxelContainerGroup.remove(child);
-                if (child.geometry) child.geometry.dispose();
-                if (child.material) {
-                    if (Array.isArray(child.material)) {
-                        child.material.forEach(m => m.dispose());
-                    } else {
-                        child.material.dispose();
+                    if (!foundParticle && particles.length < 2000) { 
+                        const p = {
+                            position: new THREE.Vector3(blockData.x, blockData.Y, blockData.z),
+                            velocity: new THREE.Vector3((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05),
+                            color: new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3),
+                            maxLife: life[0] + Math.random() * (life[1] - life[0]), life: life[0] + Math.random() * (life[1] - life[0]),
+                            size: 1 + Math.random() * 2, opacity: 1, gravity: gravity
+                        };
+                        particles.push(p);
                     }
                 }
             }
 
-            const voxelData = schematicData.voxel_data;
-            
-            // 按材质分组体素
-            const materialGroups = new Map();
-            let totalBlocks = 0;
-            const partIds = new Set();
-
-            for (const coordString in voxelData) {
-                const voxelProps = voxelData[coordString];
-                const blockId = voxelProps.blockId || 1;
-                const metaData = voxelProps.metaData || 0;
-                const partId = voxelProps.partId;
-
-                if (partId) partIds.add(partId);
-
-                // 获取纹理键
-                const textureKey = getTextureKeyForBlock(blockId, metaData);
-                
-                if (!materialGroups.has(textureKey)) {
-                    materialGroups.set(textureKey, []);
-                }
-
-                const [x, y, z] = coordString.split(',').map(Number);
-                materialGroups.get(textureKey).push({ x, y, z, coord: coordString, partId });
-                totalBlocks++;
-            }
-
-            console.log(`总方块数: ${totalBlocks}, 材质类型: ${materialGroups.size}`);
-
-            // 创建实例化网格
-            const baseGeometry = new THREE.BoxGeometry(
-                VOXEL_SIZE * 0.98, 
-                VOXEL_SIZE * 0.98, 
-                VOXEL_SIZE * 0.98
-            );
-
-            materialGroups.forEach((voxels, textureKey) => {
-                if (voxels.length === 0) return;
-
-                // 创建材质
-                let material;
-                const texture = loadedTextures.get(textureKey);
-                
-                if (texture) {
-                    // 使用用户材质包中的纹理
-                    material = new THREE.MeshStandardMaterial({ 
-                        map: texture, 
-                        metalness: 0.1, 
-                        roughness: 0.8 
-                    });
-                } else {
-                    // 使用后备颜色
-                    const color = TEXTURE_FALLBACK_COLORS[textureKey] || TEXTURE_FALLBACK_COLORS['unknown'];
-                    material = new THREE.MeshLambertMaterial({ color });
-                }
-
-                // 创建实例化网格
-                const instancedMesh = new THREE.InstancedMesh(baseGeometry, material, voxels.length);
-                instancedMesh.castShadow = true;
-                instancedMesh.receiveShadow = true;
-
-                const dummy = new THREE.Object3D();
-                const halfGrid = GRID_SIZE / 2;
-
-                voxels.forEach((voxel, i) => {
-                    const posX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
-                    const posY = (voxel.y + 0.5) * VOXEL_SIZE;
-                    const posZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
-
-                    dummy.position.set(posX, posY, posZ);
-                    dummy.updateMatrix();
-                    instancedMesh.setMatrixAt(i, dummy.matrix);
-                });
-
-                instancedMesh.instanceMatrix.needsUpdate = true;
-                instancedMesh.userData.textureKey = textureKey;
-                voxelContainerGroup.add(instancedMesh);
-            });
-
-            // 更新统计信息
-            document.getElementById('block-count').textContent = totalBlocks;
-            document.getElementById('part-count').textContent = partIds.size;
-
-            // 显示部件列表
-            displayPartsList(partIds);
-
-            console.log('图纸显示完成');
-        }
-
-        function displayPartsList(partIds) {
-            const partsList = document.getElementById('parts-list');
-            
-            if (partIds.size === 0) {
-                partsList.innerHTML = '<div class="text-gray-500">暂无部件信息</div>';
-                return;
-            }
-
-            let html = '<div class="space-y-2">';
-            let index = 1;
-            partIds.forEach(partId => {
-                html += `
-                    <div class="bg-gray-800 p-2 rounded border border-gray-700">
-                        <div class="font-semibold text-purple-300">部件 ${index}</div>
-                        <div class="text-xs text-gray-500 mt-1">ID: ${partId.substring(0, 8)}...</div>
-                    </div>
-                `;
-                index++;
-            });
-            html += '</div>';
-            
-            partsList.innerHTML = html;
-        }
-
-        function getTextureKeyForBlock(blockId, metaData) {
-            const blockEntry = BLOCK_ID_DICT[blockId.toString()];
-            if (!blockEntry) return 'unknown';
-
-            const metaEntry = blockEntry[metaData.toString()];
-            if (!metaEntry) return 'unknown';
-
-            if (typeof metaEntry === 'string') {
-                return metaEntry.split(':')[0];
-            }
-
-            if (typeof metaEntry === 'object' && metaEntry !== null) {
-                // 处理多面纹理 (优先使用通用纹理 '*')
-                const key = metaEntry['*'] || metaEntry.top || metaEntry.side || metaEntry.north || 'unknown';
-                return key.split(':')[0];
-            }
-
-            return 'unknown';
-        }
-
-        // ====================================================================
-        // 交互功能
-        // ====================================================================
-        function setCameraView(view) {
-            const distance = GRID_SIZE * 1.5;
-            const target = new THREE.Vector3(0, GRID_SIZE / 2, 0);
-
-            let newPos;
-            switch (view) {
-                case 'front':
-                    newPos = new THREE.Vector3(0, GRID_SIZE / 2, distance);
-                    break;
-                case 'back':
-                    newPos = new THREE.Vector3(0, GRID_SIZE / 2, -distance);
-                    break;
-                case 'left':
-                    newPos = new THREE.Vector3(-distance, GRID_SIZE / 2, 0);
-                    break;
-                case 'right':
-                    newPos = new THREE.Vector3(distance, GRID_SIZE / 2, 0);
-                    break;
-                case 'top':
-                    newPos = new THREE.Vector3(0, distance, 0);
-                    break;
-                case 'bottom':
-                    newPos = new THREE.Vector3(0, -distance, 0);
-                    break;
-                case 'iso':
-                default:
-                    newPos = new THREE.Vector3(distance, distance, distance);
-                    break;
-            }
-
-            animateCameraTo(newPos, target);
-        }
-
-        function animateCameraTo(newPosition, newTarget) {
-            const startPosition = camera.position.clone();
-            const startTarget = controls.target.clone();
-            const duration = 1000;
-            const startTime = Date.now();
-
-            function animate() {
-                const elapsed = Date.now() - startTime;
-                const progress = Math.min(elapsed / duration, 1);
-                const eased = easeInOutCubic(progress);
-
-                camera.position.lerpVectors(startPosition, newPosition, eased);
-                controls.target.lerpVectors(startTarget, newTarget, eased);
-                controls.update();
-
-                if (progress < 1) {
-                    requestAnimationFrame(animate);
-                }
-            }
-
+            // --- 13. 启动和事件监听 ---
+            document.getElementById('loading-overlay').style.display = 'none';
             animate();
-        }
 
-        function easeInOutCubic(t) {
-            return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        }
-
-        function takeScreenshot() {
-            renderer.render(scene, camera);
-            renderer.domElement.toBlob((blob) => {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'schematic_screenshot_' + Date.now() + '.png';
-                a.click();
-                URL.revokeObjectURL(url);
+            // 折叠面板事件
+            panelToggle.addEventListener('click', () => {
+                panelContent.classList.toggle('collapsed');
+                toggleIcon.classList.toggle('collapsed');
             });
-        }
 
-        function toggleWireframe() {
-            wireframeMode = !wireframeMode;
-            voxelContainerGroup.children.forEach(child => {
-                if (child.material) {
-                    if (Array.isArray(child.material)) {
-                        child.material.forEach(m => m.wireframe = wireframeMode);
-                    } else {
-                        child.material.wireframe = wireframeMode;
-                    }
-                }
+            // V6: 三个控件的事件
+            effectSelector.addEventListener('change', (e) => { currentEffect = e.target.value; });
+            magicSelector.addEventListener('change', (e) => { currentMagicTheme = e.target.value; });
+            particleSlider.addEventListener('input', (e) => { 
+                particleDensity = parseInt(e.target.value, 10);
+                particleDensityLabel.textContent = `${particleDensity}%`;
             });
-        }
 
-        // ====================================================================
-        // 启动
-        // ====================================================================
-        document.addEventListener('DOMContentLoaded', init);
+            // 开始按钮事件
+            startButton.addEventListener('click', () => {
+                if (isBuilding) return; 
+                const effectName = effectSelector.options[effectSelector.selectedIndex].text;
+                const magicName = magicSelector.options[magicSelector.selectedIndex].text;
+                const dynamicLog = [...aiLogBase, `动画: ${effectName}`, `主题: ${magicName}`, `密度: ${particleDensity}%`, "开始建造!"];
+                typeText(dynamicLog, () => { animateBuild(); });
+            });
+
+            aiOutput.textContent = "准备就绪。请组合动画和魔法！";
+        }
     </script>
 </body>
 </html>
-"""
-
-# --- Flask 路由 ---
-
-@app.route('/')
-def index():
-    """提供主HTML页面"""
-    # 传递方块ID字典到前端
-    return render_template_string(HTML_CONTENT, block_id_dict=get_block_id_dictionary())
-
-@app.route('/api/data')
-def get_data():
-    """API端点，返回图纸数据和材质包"""
-    logging.info("收到数据请求...")
-    
-    result = {
-        'schematicData': None,
-        'texturePackData': None
-    }
-    
-    # 1. 加载图纸/存档文件
-    if SCHEMATIC_FILE and os.path.exists(SCHEMATIC_FILE):
-        schematic_data = load_schematic_file(SCHEMATIC_FILE)
-        if schematic_data:
-            result['schematicData'] = schematic_data
-            logging.info(f"图纸文件已加载: {SCHEMATIC_FILE}")
-    else:
-        # 尝试从input目录自动查找
-        schematic_path = find_first_file(INPUT_DIR, ['.zip', '.json'])
-        if schematic_path:
-            schematic_data = load_schematic_file(schematic_path)
-            if schematic_data:
-                result['schematicData'] = schematic_data
-                logging.info(f"自动加载图纸文件: {schematic_path}")
-    
-    # 2. 加载材质包
-    texture_pack_path = find_first_file('.', ['.zip'])
-    if texture_pack_path:
-        texture_data = read_file_as_base64(texture_pack_path)
-        if texture_data:
-            result['texturePackData'] = texture_data
-            logging.info(f"材质包已加载: {texture_pack_path}")
-    
-    return jsonify(result)
-
-def get_block_id_dictionary():
-    """返回Minecraft方块ID字典"""
-    return {
-        "1": {"0": "stone", "1": "granite", "2": "polished_granite", "3": "stone_diorite", "4": "polished_diorite", "5": "andersite", "6": "polished_andersite"},
-        "2": {"0": {"top": "grass_top", "bottom": "dirt", "*": "grass_side"}},
-        "3": {"0": "dirt", "1": "coarse_dirt", "2": "podzol"},
-        "4": {"0": "cobblestone"},
-        "5": {"0": "planks_oak", "1": "planks_spruce", "2": "planks_birch", "3": "planks_jungle", "4": "planks_acacia", "5": "planks_big_oak"},
-        "7": {"0": "cobblestone"},
-        "12": {"0": "sand", "1": "red_sand"},
-        "13": {"0": "gravel"},
-        "14": {"0": "gold_ore"},
-        "15": {"0": "iron_ore"},
-        "16": {"0": "coal_ore"},
-        "17": {
-            "0": {"top": "log_oak_top", "bottom": "log_oak_top", "*": "log_oak"},
-            "1": {"top": "log_spruce_top", "bottom": "log_spruce_top", "*": "log_spruce"},
-            "2": {"top": "log_birch_top", "bottom": "log_birch_top", "*": "log_birch"},
-            "3": {"top": "log_jungle_top", "bottom": "log_jungle_top", "*": "log_jungle"}
-        },
-        "24": {
-            "0": {"top": "sandstone_top", "bottom": "sandstone_bottom", "*": "sandstone_normal"},
-            "1": {"top": "sandstone_top", "bottom": "sandstone_bottom", "*": "sandstone_carved"},
-            "2": {"top": "sandstone_top", "bottom": "sandstone_bottom", "*": "sandstone_smooth"}
-        },
-        "35": {
-            "0": "wool_colored_white", "1": "wool_colored_orange", "2": "wool_colored_magenta",
-            "3": "wool_colored_light_blue", "4": "wool_colored_yellow", "5": "wool_colored_lime",
-            "6": "wool_colored_pink", "7": "wool_colored_gray", "8": "wool_colored_silver",
-            "9": "wool_colored_cyan", "10": "wool_colored_purple", "11": "wool_colored_blue",
-            "12": "wool_colored_brown", "13": "wool_colored_green", "14": "wool_colored_red",
-            "15": "wool_colored_black"
-        },
-        "41": {"0": "gold_block"},
-        "42": {"0": "iron_block"},
-        "43": {
-            "0": {"top": "stone_slab_top", "bottom": "stone_slab_top", "*": "stone_slab_side"},
-            "1": {"top": "sandstone_top", "bottom": "sandstone_bottom", "*": "sandstone_normal"},
-            "2": "planks_oak",
-            "3": "cobblestone",
-            "4": "brick",
-            "5": "stonebrick",
-            "6": "nether_brick",
-            "7": "quartz_block_side"
-        },
-        "45": {"0": "brick"},
-        "46": {"*": {"top": "tnt_top", "bottom": "tnt_bottom", "*": "tnt_side"}},
-        "48": {"0": "cobblestone_mossy"},
-        "49": {"0": "obsidian"},
-        "56": {"0": "diamond_ore"},
-        "57": {"0": "diamond_block"},
-        "73": {"0": "redstone_ore"},
-        "79": {"0": "ice"},
-        "80": {"0": "snow"},
-        "82": {"0": "clay"},
-        "86": {
-            "0": {"top": "pumpkin_top", "bottom": "pumpkin_top", "south": "pumpkin_face_off", "*": "pumpkin_side"}
-        },
-        "87": {"0": "netherrack"},
-        "88": {"0": "soul_sand"},
-        "89": {"0": "glowstone"},
-        "95": {
-            "0": "glass_white", "1": "glass_orange", "2": "glass_magenta",
-            "3": "glass_light_blue", "4": "glass_yellow", "5": "glass_lime"
-        },
-        "98": {"0": "stonebrick", "1": "stonebrick_mossy", "2": "stonebrick_cracked", "3": "stonebrick_carved"},
-        "103": {"0": {"top": "melon_top", "bottom": "melon_bottom", "*": "melon_side"}},
-        "112": {"0": "nether_brick"},
-        "129": {"0": "emerald_ore"},
-        "133": {"0": "emerald_block"},
-        "152": {"0": "redstone_block"},
-        "155": {
-            "0": {"top": "quartz_block_top", "bottom": "quartz_block_bottom", "*": "quartz_block_side"},
-            "1": {"top": "quartz_block_chiseled_top", "bottom": "quartz_block_bottom", "*": "quartz_block_chiseled"}
-        },
-        "172": {"0": "hardened_clay"},
-        "173": {"0": "coal_block"}
-    }
-
-# --- 主程序入口 ---
-
-def main():
-    """主函数，用于设置并运行Web服务器"""
-    global SCHEMATIC_FILE
-    
-    # 参数解析
-    parser = argparse.ArgumentParser(description="Minecraft 建筑图纸查看器")
-    parser.add_argument('--schematic', type=str, help='要加载的图纸/存档文件路径 (.zip 或 .json)')
-    parser.add_argument('--port', type=int, default=PORT, help=f'服务器端口 (默认: {PORT})')
-    args = parser.parse_args()
-    
-    if args.schematic:
-        if os.path.exists(args.schematic):
-            SCHEMATIC_FILE = args.schematic
-            logging.info(f"将加载指定的图纸文件: {SCHEMATIC_FILE}")
-        else:
-            logging.warning(f"指定的图纸文件不存在: {args.schematic}")
-    
-    # 确保input目录存在
-    if not os.path.exists(INPUT_DIR):
-        logging.info(f"正在创建 '{INPUT_DIR}' 目录")
-        os.makedirs(INPUT_DIR)
-    
-    # 打印使用说明
-    print("\n" + "="*70)
-    print("🏗️  Minecraft 建筑图纸查看器")
-    print(f"服务器正在 http://127.0.0.1:{args.port} 上运行")
-    print("\n" + "-"*70)
-    print("使用说明:")
-    print(f"1. 将图纸/存档文件 (.zip 或 .json) 放入 '{INPUT_DIR}/' 文件夹")
-    print(f"   或使用 --schematic <文件路径> 参数直接指定")
-    print("2. 将 Minecraft 材质包 (.zip) 放在当前目录")
-    print("3. 在浏览器中打开上述地址")
-    print("\n特性:")
-    print("✓ 从用户材质包加载真实纹理 (不使用代码生成的草方块等)")
-    print("✓ 保留存档中的所有模型部件信息")
-    print("✓ 支持方块ID字典映射")
-    print("="*70 + "\n")
-    
-    # 启动 Flask 服务器
-    app.run(host='0.0.0.0', port=args.port, debug=False)
-
-if __name__ == '__main__':
-    main()
