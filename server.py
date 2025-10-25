@@ -161,6 +161,7 @@ HTML_CONTENT = """
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+    <script src="https://unpkg.com/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>
     <style>
         body { background-color: #111827; color: #f3f4f6; overflow: hidden; margin: 0; padding: 0; font-family: sans-serif; }
         #main-container { position: relative; width: 100vw; height: 100vh; }
@@ -194,6 +195,83 @@ HTML_CONTENT = """
                     验证中...
                 </span>
             </button>
+        </div>
+    </div>
+    <!-- NEW: Render Animation Window -->
+    <div id="render-animation-window" class="fixed inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center z-50 hidden">
+        <div class="bg-gray-800 p-4 rounded-lg shadow-2xl w-full max-w-6xl h-[90vh] mx-4 flex flex-col">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">动画渲染窗口</h2>
+                <button id="close-render-window-btn" class="text-gray-400 hover:text-white text-3xl">&times;</button>
+            </div>
+            <div class="flex-grow flex gap-4">
+                <!-- Control Panel -->
+                <div class="w-1/4 bg-gray-900 p-4 rounded-lg overflow-y-auto custom-scrollbar">
+                    <h3 class="text-lg font-semibold text-white mb-4">控制面板</h3>
+
+                    <!-- Animation Type -->
+                    <div class="mb-4">
+                        <label for="anim-type-select" class="block text-sm font-medium text-gray-300 mb-2">动画类型</label>
+                        <select id="anim-type-select" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-sm">
+                            <option value="gradient">渐变 (Gradient)</option>
+                            <option value="vortex">旋涡 (Vortex)</option>
+                            <option value="ripple">波纹 (Ripple)</option>
+                            <option value="rain">天降 (Rain Down)</option>
+                            <option value="ground_up">从地升起 (Ground Up)</option>
+                            <option value="layer_scan">逐层扫描 (Layer Scan)</option>
+                            <option value="assemble">组装 (Assemble)</option>
+                            <option value="simple">闪现 (Simple)</option>
+                        </select>
+                    </div>
+
+                    <!-- Special Effects -->
+                    <div class="mb-4">
+                        <label for="sfx-select" class="block text-sm font-medium text-gray-300 mb-2">魔法特效</label>
+                        <select id="sfx-select" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md text-gray-200 text-sm">
+                            <option value="rune_energy_green">符文能量 (绿色)</option>
+                            <option value="flame_red_orange">烈焰 (红色/橙色)</option>
+                            <option value="ice_blue_white">寒冰 (蓝色/白色)</option>
+                            <option value="shadow_purple">暗影 (紫色)</option>
+                            <option value="none">无 (None)</option>
+                        </select>
+                    </div>
+
+                    <!-- Playback Controls -->
+                    <div class="mb-4 pt-4 border-t border-gray-700">
+                        <button id="play-render-animation-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">播放动画</button>
+                    </div>
+
+                    <!-- Progress Bar -->
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-300 mb-2">进度</label>
+                        <div class="w-full bg-gray-700 rounded-full h-2.5">
+                            <div id="render-progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+                        </div>
+                        <p id="render-progress-text" class="text-center text-xs text-gray-400 mt-1">0%</p>
+                    </div>
+
+                    <!-- Export -->
+                    <div class="pt-4 border-t border-gray-700">
+                        <button id="export-mp4-btn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md disabled:opacity-50" disabled>导出 MP4</button>
+                    </div>
+
+                    <!-- AI Log -->
+                    <div class="mt-4 pt-4 border-t border-gray-700">
+                        <h4 class="text-md font-semibold text-white mb-2">AI 生成日志:</h4>
+                        <div id="ai-render-log" class="text-xs text-gray-400 bg-gray-800 p-2 rounded h-32 overflow-y-auto custom-scrollbar">
+
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 3D Canvas -->
+                <div id="render-canvas-container" class="flex-grow bg-gray-900 rounded-lg relative">
+                    <div id="render-canvas-mount" class="w-full h-full"></div>
+                    <div id="render-loading-overlay" class="absolute inset-0 bg-gray-900 bg-opacity-70 flex items-center justify-center hidden">
+                        <p class="text-white text-lg">正在加载 3D 场景...</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     <div id="main-container" class="opacity-20 pointer-events-none">
@@ -259,6 +337,7 @@ HTML_CONTENT = """
             <div class="mt-3 pt-3 border-t border-gray-700">
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
                 <button id="play-animation-btn" class="bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>播放动画</button>
+                <button id="render-animation-btn" class="bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mt-1.5" disabled>渲染动画</button>
                 <div class="mt-2">
                     <label for="animation-speed-slider" class="block text-xs font-medium text-gray-400">速度</label>
                     <input type="range" id="animation-speed-slider" min="1" max="100" value="50" class="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer">
@@ -369,6 +448,7 @@ HTML_CONTENT = """
         // Global State
         // ====================================================================
         let scene, camera, renderer, controls, raycaster;
+        let renderScene, renderCamera, renderRenderer, renderControls;
         let voxelContainerGroup, selectionHighlightMesh;
         let loadedModel = null;
         let referenceImage = null;
@@ -662,6 +742,166 @@ HTML_CONTENT = """
             renderer.setSize(width, height);
             camera.aspect = width / height;
             camera.updateProjectionMatrix();
+
+            if (renderRenderer) {
+                const renderMount = document.getElementById('render-canvas-mount');
+                if (!renderMount) return;
+                const renderWidth = renderMount.clientWidth;
+                const renderHeight = renderMount.clientHeight;
+                renderRenderer.setSize(renderWidth, renderHeight);
+                renderCamera.aspect = renderWidth / renderHeight;
+                renderCamera.updateProjectionMatrix();
+            }
+        }
+
+        function initRenderScene() {
+            if (renderScene) {
+                // Scene already exists, just make sure it's up to date
+                cloneVoxelsToRenderScene();
+                return;
+            }
+
+            const mount = document.getElementById('render-canvas-mount');
+            if (!mount) return;
+
+            renderScene = new THREE.Scene();
+            renderScene.background = new THREE.Color(0x111827); // Darker background for the render window
+
+            renderCamera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
+            renderCamera.position.set(GRID_SIZE, GRID_SIZE, GRID_SIZE);
+
+            renderRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+            renderRenderer.setSize(mount.clientWidth, mount.clientHeight);
+            renderRenderer.setPixelRatio(window.devicePixelRatio);
+            renderRenderer.shadowMap.enabled = true;
+            renderRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            mount.appendChild(renderRenderer.domElement);
+
+            renderControls = new THREE.OrbitControls(renderCamera, renderRenderer.domElement);
+            renderControls.enableDamping = true;
+            renderControls.target.set(0, GRID_SIZE / 2, 0);
+            renderControls.update();
+
+            renderScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            directionalLight.position.set(GRID_SIZE, GRID_SIZE * 1.5, GRID_SIZE * 0.5);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            const d = GRID_SIZE * 1.5;
+            directionalLight.shadow.camera.left = -d;
+            directionalLight.shadow.camera.right = d;
+            directionalLight.shadow.camera.top = d;
+            directionalLight.shadow.camera.bottom = -d;
+            directionalLight.shadow.camera.far = GRID_SIZE * 5;
+            directionalLight.shadow.bias = -0.0001;
+            renderScene.add(directionalLight);
+
+            const groundPlane = new THREE.Mesh(
+                new THREE.PlaneGeometry(GRID_SIZE * 2, GRID_SIZE * 2),
+                new THREE.ShadowMaterial({ opacity: 0.3 })
+            );
+            groundPlane.rotation.x = -Math.PI / 2;
+            groundPlane.position.y = -0.01;
+            groundPlane.receiveShadow = true;
+            renderScene.add(groundPlane);
+
+
+            function animateRenderScene() {
+                requestAnimationFrame(animateRenderScene);
+                renderControls.update();
+                renderRenderer.render(renderScene, renderCamera);
+            }
+            animateRenderScene();
+            cloneVoxelsToRenderScene();
+        }
+
+        function cloneVoxelsToRenderScene() {
+            if (!renderScene) return;
+
+            // Clear previous model
+            while (renderScene.children.length > 0) {
+                const child = renderScene.children[0];
+                if (child.isLight || child.isCamera || child.isGridHelper || child.isPlane) {
+                     // Don't remove lights, cameras, etc.
+                } else {
+                    renderScene.remove(child);
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(m => m.dispose());
+                        } else {
+                            child.material.dispose();
+                        }
+                    }
+                }
+            }
+
+            // Add back the essentials we might have removed in a simpler loop
+            if (!renderScene.children.find(c => c.isAmbientLight)) {
+                 renderScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            }
+             if (!renderScene.children.find(c => c.isDirectionalLight)) {
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
+                directionalLight.position.set(GRID_SIZE, GRID_SIZE * 1.5, GRID_SIZE * 0.5);
+                directionalLight.castShadow = true;
+                renderScene.add(directionalLight);
+            }
+             if (!renderScene.children.find(c => c.geometry && c.geometry.type === "PlaneGeometry")) {
+                const groundPlane = new THREE.Mesh( new THREE.PlaneGeometry(GRID_SIZE * 2, GRID_SIZE * 2), new THREE.ShadowMaterial({ opacity: 0.3 }));
+                groundPlane.rotation.x = -Math.PI / 2;
+                groundPlane.position.y = -0.01;
+                groundPlane.receiveShadow = true;
+                renderScene.add(groundPlane);
+            }
+
+
+            const materialToInstancesMap = new Map();
+            currentVoxelCoords.forEach(coordString => {
+                const voxelProps = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                const textureKey = getTextureKeyForVoxel(voxelProps.blockId, voxelProps.metaData, DEFAULT_BLOCK_ID_LIST);
+                if (textureKey === 'grass_side') {
+                    // Use grass_top for the render view to match the request
+                    if (!materialToInstancesMap.has('grass_top')) materialToInstancesMap.set('grass_top', []);
+                     materialToInstancesMap.get('grass_top').push(coordString);
+                } else {
+                    if (!materialToInstancesMap.has(textureKey)) materialToInstancesMap.set(textureKey, []);
+                    materialToInstancesMap.get(textureKey).push(coordString);
+                }
+            });
+
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+
+            materialToInstancesMap.forEach((coords, textureKey) => {
+                if (coords.length === 0) return;
+
+                const texture = loadedTextures.get(textureKey);
+                let material;
+                if (texture) {
+                    material = new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 });
+                } else {
+                    const color = TEXTURE_KEY_TO_COLOR_MAP[textureKey] || TEXTURE_KEY_TO_COLOR_MAP['unknown'];
+                    material = new THREE.MeshLambertMaterial({ color });
+                }
+
+                const instancedMesh = new THREE.InstancedMesh(baseVoxelGeometry, material, coords.length);
+                instancedMesh.castShadow = true;
+                instancedMesh.receiveShadow = true;
+
+                const matrix = new THREE.Matrix4();
+                coords.forEach((coordString, i) => {
+                    const [x, y, z] = coordString.split(',').map(Number);
+                    const halfGrid = GRID_SIZE / 2;
+                    const posX = -halfGrid + (x + 0.5) * VOXEL_SIZE;
+                    const posY = (y + 0.5) * VOXEL_SIZE;
+                    const posZ = -halfGrid + (z + 0.5) * VOXEL_SIZE;
+                    matrix.setPosition(posX, posY, posZ);
+                    instancedMesh.setMatrixAt(i, matrix);
+                });
+
+                instancedMesh.instanceMatrix.needsUpdate = true;
+                renderScene.add(instancedMesh);
+            });
         }
 
         function displayVoxels() {
@@ -675,14 +915,17 @@ HTML_CONTENT = """
             }
             const exportBtn = document.getElementById('export-txt-btn');
             const playAnimationBtn = document.getElementById('play-animation-btn');
+            const renderAnimationBtn = document.getElementById('render-animation-btn');
             if (currentVoxelCoords.size === 0) {
                 if(exportBtn) exportBtn.disabled = true;
                 if(playAnimationBtn) playAnimationBtn.disabled = true;
+                if(renderAnimationBtn) renderAnimationBtn.disabled = true;
                 updateSelectionUI();
                 return;
             }
             if(exportBtn) exportBtn.disabled = false;
             if(playAnimationBtn) playAnimationBtn.disabled = false;
+            if(renderAnimationBtn) renderAnimationBtn.disabled = false;
 
             const materialToInstancesMap = new Map();
             currentVoxelCoords.forEach(coordString => {
@@ -2114,7 +2357,215 @@ ${historyString}
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
             document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
+
+            const renderAnimationWindow = document.getElementById('render-animation-window');
+            document.getElementById('render-animation-btn').addEventListener('click', () => {
+                renderAnimationWindow.classList.remove('hidden');
+                initRenderScene();
+            });
+            document.getElementById('close-render-window-btn').addEventListener('click', () => {
+                renderAnimationWindow.classList.add('hidden');
+            });
+
+            document.getElementById('play-render-animation-btn').addEventListener('click', playBuildingAnimation);
+
+            document.getElementById('export-mp4-btn').addEventListener('click', exportMp4);
         });
+
+        async function exportMp4() {
+            const exportBtn = document.getElementById('export-mp4-btn');
+            exportBtn.disabled = true;
+            exportBtn.textContent = '导出中...';
+
+            const capturer = new CCapture({
+                format: 'webm',
+                framerate: 60,
+                verbose: true
+            });
+
+            // The playBuildingAnimation function needs to be aware of the capturer
+            await playBuildingAnimation(capturer);
+
+            // The animation function will call capturer.start(), capturer.capture(), and capturer.stop()
+            // and then capturer.save()
+        }
+
+        async function playBuildingAnimation(capturer) {
+            if (!renderScene) return;
+
+            const isCapturing = !!capturer;
+            const playBtn = document.getElementById('play-render-animation-btn');
+            playBtn.disabled = true;
+            playBtn.textContent = isCapturing ? '渲染中...' : '播放中...';
+
+            // Temporarily disable other controls
+            const controlsToDisable = ['anim-type-select', 'sfx-select', 'export-mp4-btn'];
+            controlsToDisable.forEach(id => document.getElementById(id).disabled = true);
+
+            // Clear the scene of any existing voxel meshes before starting the animation
+            const objectsToRemove = renderScene.children.filter(child => child.isMesh);
+            objectsToRemove.forEach(obj => renderScene.remove(obj));
+
+
+            const animationType = document.getElementById('anim-type-select').value;
+
+            const allVoxels = [];
+            voxelProperties.forEach((props, coordString) => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                allVoxels.push({ x, y, z, props });
+            });
+
+            // Group voxels by the part they belong to
+            const parts = {};
+            allVoxels.forEach(voxel => {
+                const partId = voxel.props.partId || 'default';
+                if (!parts[partId]) {
+                    parts[partId] = [];
+                }
+                parts[partId].push(voxel);
+            });
+
+            const partKeys = Object.keys(parts);
+            let totalVoxelsAnimated = 0;
+            const totalVoxelCount = allVoxels.length;
+
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+
+            if(isCapturing) capturer.start();
+
+            const animationPromises = [];
+
+            for (const partId of partKeys) {
+                const voxelsInPart = parts[partId];
+
+                // Sort voxels for this part based on animation type
+                 switch(animationType) {
+                    case 'ground_up':
+                        voxelsInPart.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
+                        break;
+                    case 'rain':
+                        voxelsInPart.sort((a, b) => b.y - a.y || a.x - b.x || a.z - b.z);
+                        break;
+                    case 'layer_scan':
+                        voxelsInPart.sort((a, b) => a.z - b.z || a.y - b.y || a.x - b.x);
+                        break;
+                    default:
+                        for (let i = voxelsInPart.length - 1; i > 0; i--) {
+                            const j = Math.floor(Math.random() * (i + 1));
+                            [voxelsInPart[i], voxelsInPart[j]] = [voxelsInPart[j], voxelsInPart[i]];
+                        }
+                        break;
+                }
+
+                const delayBetweenVoxels = 10;
+
+                for (let i = 0; i < voxelsInPart.length; i++) {
+                     const voxel = voxelsInPart[i];
+                    const halfGrid = GRID_SIZE / 2;
+                    const targetX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
+                    const targetY = (voxel.y + 0.5) * VOXEL_SIZE;
+                    const targetZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
+
+                    const textureKey = getTextureKeyForVoxel(voxel.props.blockId, voxel.props.metaData, DEFAULT_BLOCK_ID_LIST);
+                     const texture = loadedTextures.get(textureKey === 'grass_side' ? 'grass_top' : textureKey);
+                    const material = texture ?
+                        new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 }) :
+                        new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[textureKey] || 0xff00ff });
+
+                    const mesh = new THREE.Mesh(baseVoxelGeometry, material);
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+
+                    let startX = targetX, startY = targetY, startZ = targetZ;
+
+                    switch(animationType) {
+                        case 'rain': startY = GRID_SIZE * 1.5; break;
+                        case 'ground_up': startY = -GRID_SIZE * 0.5; break;
+                        case 'assemble':
+                            startX = (Math.random() - 0.5) * GRID_SIZE * 2;
+                            startY = Math.random() * GRID_SIZE * 2;
+                            startZ = (Math.random() - 0.5) * GRID_SIZE * 2;
+                            break;
+                        case 'simple': mesh.visible = false; break;
+                    }
+                    mesh.position.set(startX, startY, startZ);
+                    renderScene.add(mesh);
+
+                    const animationDuration = 500;
+
+                    const promise = new Promise(resolve => {
+                         setTimeout(() => {
+                            if (animationType === 'simple') {
+                                mesh.visible = true;
+                                mesh.position.set(targetX, targetY, targetZ);
+                                resolve();
+                            } else {
+                                const startTime = Date.now();
+                                function animateVoxel() {
+                                    const elapsedTime = Date.now() - startTime;
+                                    let t = Math.min(1, elapsedTime / animationDuration);
+                                    const easedT = 1 - Math.pow(1 - t, 3);
+
+                                    mesh.position.x = startX + (targetX - startX) * easedT;
+                                    mesh.position.y = startY + (targetY - startY) * easedT;
+                                    mesh.position.z = startZ + (targetZ - startZ) * easedT;
+
+                                    if (t < 1) {
+                                        requestAnimationFrame(animateVoxel);
+                                    } else {
+                                        resolve();
+                                    }
+                                }
+                                animateVoxel();
+                            }
+
+                            totalVoxelsAnimated++;
+                            const progress = (totalVoxelsAnimated / totalVoxelCount) * 100;
+                            document.getElementById('render-progress-bar').style.width = `${progress}%`;
+                            document.getElementById('render-progress-text').textContent = `${Math.round(progress)}%`;
+
+                        }, (totalVoxelsAnimated + i) * delayBetweenVoxels);
+                    });
+                    animationPromises.push(promise);
+                }
+            }
+
+            if (isCapturing) {
+                // Animation loop for capturing
+                const captureLoop = async () => {
+                    await Promise.all(animationPromises);
+                    capturer.stop();
+                    capturer.save();
+                    resetUI();
+                };
+
+                const renderAndCapture = () => {
+                    if (document.getElementById('render-animation-window').classList.contains('hidden')) {
+                         capturer.stop();
+                         resetUI();
+                         return;
+                    }
+                     requestAnimationFrame(renderAndCapture);
+                     renderControls.update();
+                     renderRenderer.render(renderScene, renderCamera);
+                     capturer.capture(renderRenderer.domElement);
+                }
+                renderAndCapture();
+                captureLoop();
+
+            } else {
+                await Promise.all(animationPromises);
+                resetUI();
+            }
+
+            function resetUI() {
+                playBtn.disabled = false;
+                playBtn.textContent = '播放动画';
+                controlsToDisable.forEach(id => document.getElementById(id).disabled = false);
+                document.getElementById('export-mp4-btn').disabled = false;
+                 if (isCapturing) document.getElementById('export-mp4-btn').textContent = '导出 MP4';
+            }
+        }
 
         // --- 存档功能函数 ---
         
