@@ -159,17 +159,21 @@ RENDER_WINDOW_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>建筑动画渲染窗口</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.net/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; background-color: #1f2937; }
+        body { margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #87CEEB; }
         canvas { display: block; }
-        #controls-panel { position: absolute; top: 20px; left: 20px; background: rgba(31, 41, 55, 0.95); padding: 20px; border-radius: 10px; color: white; max-width: 350px; max-height: calc(100vh - 40px); overflow-y: auto; }
+        #controls-panel { position: absolute; top: 20px; left: 20px; background: rgba(31, 41, 55, 0.95); padding: 20px; border-radius: 10px; color: white; max-width: 400px; max-height: calc(100vh - 40px); overflow-y: auto; }
         #controls-panel::-webkit-scrollbar { width: 8px; }
         #controls-panel::-webkit-scrollbar-track { background: #374151; border-radius: 4px; }
         #controls-panel::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
         .part-control { background: rgba(55, 65, 81, 0.7); padding: 10px; margin: 10px 0; border-radius: 5px; }
         .recording { background-color: #dc2626 !important; }
+        input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; background: #4b5563; border-radius: 5px; outline: none; opacity: 0.7; transition: opacity .2s; }
+        input[type=range]:hover { opacity: 1; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; background: #10b981; border-radius: 50%; cursor: pointer; }
+        input[type=range]::-moz-range-thumb { width: 20px; height: 20px; background: #10b981; border-radius: 50%; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -179,20 +183,38 @@ RENDER_WINDOW_HTML = """
         <h2 class="text-xl font-bold mb-4">🎬 建筑动画渲染</h2>
         
         <div class="mb-4">
-            <label class="block text-sm font-semibold mb-2">全局动画效果</label>
+            <label class="block text-sm font-semibold mb-2">全局建筑动画</label>
             <select id="global-effect" class="w-full p-2 bg-gray-700 rounded text-sm">
-                <option value="fade">淡入淡出</option>
-                <option value="rise">升起</option>
-                <option value="fall">下落</option>
-                <option value="spiral">螺旋</option>
-                <option value="explode">爆炸组装</option>
+                <option value="magic-gradient">渐变 (Gradient)</option>
+                <option value="vortex">旋涡 (Vortex)</option>
+                <option value="ripple">波纹 (Ripple)</option>
+                <option value="rain-down">天降 (Rain Down)</option>
+                <option value="ground-up">从地升起 (Ground Up)</option>
+                <option value="layer-scan">逐层扫描 (Layer Scan)</option>
+                <option value="assemble">组装 (Assemble)</option>
+                <option value="simple">闪现 (Simple)</option>
             </select>
         </div>
         
         <div class="mb-4">
-            <label class="block text-sm font-semibold mb-2">动画速度</label>
+            <label class="block text-sm font-semibold mb-2">魔法主题</label>
+            <select id="magic-theme" class="w-full p-2 bg-gray-700 rounded text-sm">
+                <option value="rune-energy" selected>符文能量 (绿色)</option>
+                <option value="fire">烈焰 (红色/橙色)</option>
+                <option value="ice">寒冰 (蓝色/白色)</option>
+                <option value="shadow">暗影 (紫色)</option>
+                <option value="none">无 (None)</option>
+            </select>
+        </div>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-semibold mb-2">粒子密度: <span id="particle-density-label">33%</span></label>
+            <input type="range" id="particle-density" min="0" max="100" value="33" class="w-full">
+        </div>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-semibold mb-2">动画速度: <span id="speed-value">1.0x</span></label>
             <input type="range" id="speed-slider" min="0.1" max="3" step="0.1" value="1" class="w-full">
-            <span id="speed-value" class="text-xs text-gray-400">1.0x</span>
         </div>
         
         <div id="parts-list" class="mb-4">
@@ -221,9 +243,13 @@ RENDER_WINDOW_HTML = """
         let voxelData = {};
         let modelParts = [];
         let partGroups = []; // 按区域/零件分组的体素
+        let blockGroup, particleSystem;
+        const particles = [];
         let animationSpeed = 1.0;
         let isPlaying = false;
-        let animationFrameId = null;
+        let currentMagicTheme = 'rune-energy';
+        let particleDensity = 33;
+        const MAX_PARTICLES_PER_BLOCK = 30;
         
         // 录制相关
         let mediaRecorder = null;
@@ -332,6 +358,13 @@ RENDER_WINDOW_HTML = """
             // 添加地面（草地）
             createGround();
             
+            // 初始化方块组
+            blockGroup = new THREE.Group();
+            scene.add(blockGroup);
+            
+            // 初始化粒子系统
+            initParticleSystem();
+            
             // 按Y轴分组体素（作为不同的区域/零件）
             groupVoxelsByRegions();
             
@@ -346,6 +379,13 @@ RENDER_WINDOW_HTML = """
             document.getElementById('speed-slider').addEventListener('input', (e) => {
                 animationSpeed = parseFloat(e.target.value);
                 document.getElementById('speed-value').textContent = animationSpeed.toFixed(1) + 'x';
+            });
+            document.getElementById('magic-theme').addEventListener('change', (e) => {
+                currentMagicTheme = e.target.value;
+            });
+            document.getElementById('particle-density').addEventListener('input', (e) => {
+                particleDensity = parseInt(e.target.value, 10);
+                document.getElementById('particle-density-label').textContent = `${particleDensity}%`;
             });
             
             window.addEventListener('resize', onWindowResize);
@@ -373,6 +413,21 @@ RENDER_WINDOW_HTML = """
             scene.add(groundMesh);
         }
         
+        function initParticleSystem() {
+            const particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(2000 * 3);
+            const colors = new Float32Array(2000 * 3);
+            const sizes = new Float32Array(2000);
+            for (let i = 0; i < 2000; i++) { sizes[i] = 1; }
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+            const particleMaterial = new THREE.PointsMaterial({ size: 0.1, sizeAttenuation: true, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+            particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+            particleSystem.visible = false;
+            scene.add(particleSystem);
+        }
+        
         function groupVoxelsByRegions() {
             // 按Y轴分组（每层作为一个区域）
             const layers = new Map();
@@ -392,7 +447,7 @@ RENDER_WINDOW_HTML = """
                     name: `层级 ${yLevel}`,
                     yLevel,
                     voxels,
-                    effect: 'fade' // 默认效果
+                    effect: 'magic-gradient' // 默认效果
                 }));
         }
         
@@ -406,11 +461,12 @@ RENDER_WINDOW_HTML = """
                 div.innerHTML = `
                     <div class="text-xs font-semibold mb-1">${group.name} (${group.voxels.length}块)</div>
                     <select class="w-full p-1 bg-gray-600 rounded text-xs" data-index="${index}">
-                        <option value="fade">淡入淡出</option>
-                        <option value="rise">升起</option>
-                        <option value="fall">下落</option>
-                        <option value="spiral">螺旋</option>
-                        <option value="explode">爆炸组装</option>
+                        <option value="magic-gradient">渐变 (Gradient)</option>
+                        <option value="vortex">旋涡 (Vortex)</option>
+                        <option value="rain-down">天降 (Rain Down)</option>
+                        <option value="ground-up">从地升起 (Ground Up)</option>
+                        <option value="assemble">组装 (Assemble)</option>
+                        <option value="simple">闪现 (Simple)</option>
                     </select>
                 `;
                 
@@ -434,138 +490,304 @@ RENDER_WINDOW_HTML = """
             document.getElementById('status').textContent = '正在播放动画...';
             
             // 清除现有方块
-            scene.children.filter(obj => obj.userData.isVoxel).forEach(obj => {
-                scene.remove(obj);
-            });
+            while (blockGroup.children.length > 0) {
+                blockGroup.remove(blockGroup.children[0]);
+            }
             
-            // 按顺序播放每个区域的动画
-            animateRegions(0);
+            // 根据魔法主题和密度决定粒子系统是否可见
+            particleSystem.visible = (currentMagicTheme !== 'none' && particleDensity > 0);
+            
+            // 获取全局效果
+            const globalEffect = document.getElementById('global-effect').value;
+            
+            // 特殊处理逐层扫描和波纹效果
+            if (globalEffect === 'layer-scan') {
+                animateLayerScan();
+            } else if (globalEffect === 'ripple') {
+                animateRipple();
+            } else {
+                animateRegions(0, globalEffect);
+            }
         }
         
-        function animateRegions(regionIndex) {
+        function animateRegions(regionIndex, effectOverride = null) {
             if (!isPlaying || regionIndex >= partGroups.length) {
-                // 动画完成
                 stopAnimation();
                 return;
             }
             
             const region = partGroups[regionIndex];
-            const effect = region.effect;
-            const delay = 1000 / animationSpeed; // 每个区域之间的延迟
+            const effect = effectOverride || region.effect;
+            const delay = 1000 / animationSpeed;
             
-            // 根据效果类型播放动画
-            animateRegionWithEffect(region, effect, () => {
-                // 这个区域完成后，播放下一个
+            // 播放区域动画
+            animateRegionBlocks(region, effect, () => {
                 setTimeout(() => {
-                    animateRegions(regionIndex + 1);
+                    animateRegions(regionIndex + 1, effectOverride);
                 }, delay);
             });
         }
         
-        function animateRegionWithEffect(region, effect, onComplete) {
-            const duration = 1000 / animationSpeed; // 动画持续时间
+        function animateRegionBlocks(region, effect, onComplete) {
             const voxels = region.voxels;
-            const meshes = [];
             
-            // 创建所有方块
             voxels.forEach(voxel => {
-                const geometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
-                const material = getMaterialForVoxel(voxel.props);
-                const mesh = new THREE.Mesh(geometry, material);
+                const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
+                const baseColor = new THREE.Color(0x808080); // 默认颜色
                 
-                const halfGrid = GRID_SIZE / 2;
-                const targetX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
-                const targetY = (voxel.y + 0.5) * VOXEL_SIZE;
-                const targetZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
-                
-                mesh.userData.target = { x: targetX, y: targetY, z: targetZ };
-                mesh.userData.isVoxel = true;
-                
-                // 根据效果设置初始位置
-                switch (effect) {
-                    case 'fade':
-                        mesh.position.set(targetX, targetY, targetZ);
-                        mesh.material.transparent = true;
-                        mesh.material.opacity = 0;
-                        break;
-                    case 'rise':
-                        mesh.position.set(targetX, targetY - 10, targetZ);
-                        break;
-                    case 'fall':
-                        mesh.position.set(targetX, targetY + 20, targetZ);
-                        break;
-                    case 'spiral':
-                        mesh.position.set(targetX, targetY, targetZ);
-                        mesh.scale.set(0, 0, 0);
-                        mesh.userData.angle = Math.random() * Math.PI * 2;
-                        break;
-                    case 'explode':
-                        const dist = Math.sqrt(Math.pow(voxel.x, 2) + Math.pow(voxel.z, 2)) * 2;
-                        mesh.position.set(targetX * 3, targetY, targetZ * 3);
-                        break;
-                }
-                
-                scene.add(mesh);
-                meshes.push(mesh);
+                const block = createAnimatedBlock(blockData, baseColor, effect);
+                applyMagicTheme(block, blockData, currentMagicTheme);
             });
             
-            // 动画更新
+            // 等待动画完成
+            setTimeout(onComplete, 1000 / animationSpeed);
+        }
+        
+        function createAnimatedBlock(blockData, baseColor, effect) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+            const material = getMaterialForVoxel(blockData);
+            const block = new THREE.Mesh(blockGeometry, material);
+            
+            const halfGrid = GRID_SIZE / 2;
+            const targetX = -halfGrid + (blockData.x + 0.5) * VOXEL_SIZE;
+            const targetY = (blockData.y + 0.5) * VOXEL_SIZE;
+            const targetZ = -halfGrid + (blockData.z + 0.5) * VOXEL_SIZE;
+            
+            block.userData.target = { x: targetX, y: targetY, z: targetZ };
+            
+            switch (effect) {
+                case 'magic-gradient':
+                    block.position.set(targetX, targetY, targetZ);
+                    block.scale.set(0.8, 0.8, 0.8);
+                    if (material.transparent === undefined) {
+                        material.transparent = true;
+                        material.opacity = 0.01;
+                    }
+                    animateMagicGradient(block);
+                    break;
+                case 'vortex':
+                    animateVortex(block, blockData);
+                    break;
+                case 'rain-down':
+                    block.position.set(targetX, targetY + 15, targetZ);
+                    animateRainDown(block, targetY);
+                    break;
+                case 'ground-up':
+                    block.position.set(targetX, -5, targetZ);
+                    animateGroundUp(block, targetY);
+                    break;
+                case 'assemble':
+                    const startX = blockData.x > 0 ? targetX + 15 : targetX - 15;
+                    block.position.set(startX, targetY, targetZ);
+                    animateAssemble(block, targetX);
+                    break;
+                case 'simple':
+                default:
+                    block.position.set(targetX, targetY, targetZ);
+                    block.scale.set(0, 0, 0);
+                    animateSimple(block);
+                    break;
+            }
+            
+            blockGroup.add(block);
+            return block;
+        }
+        
+        function animateMagicGradient(block) {
+            let progress = 0;
+            const duration = 1000 / animationSpeed;
+            const startTime = Date.now();
+            const startScale = block.scale.clone();
+            const targetScale = new THREE.Vector3(1, 1, 1);
+            
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = Math.pow(progress, 2);
+                if (block.material.opacity !== undefined) {
+                    block.material.opacity = 0.01 + 0.99 * easedProgress;
+                }
+                block.scale.lerpVectors(startScale, targetScale, easedProgress);
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    if (block.material.opacity !== undefined) {
+                        block.material.opacity = 1;
+                    }
+                    block.scale.set(1, 1, 1);
+                }
+            }
+            animate();
+        }
+        
+        function animateVortex(block, blockData) {
+            const target = block.userData.target;
+            let progress = 0;
+            const duration = 800 / animationSpeed;
+            const startTime = Date.now();
+            const startRadius = 10.0;
+            const startAngle = Math.random() * Math.PI * 2;
+            const totalRotations = 3 * Math.PI * 2;
+            const startY = target.y + 5 + Math.random() * 3;
+            
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                const currentRadius = startRadius * (1 - easedProgress);
+                const currentAngle = startAngle + totalRotations * easedProgress;
+                const currentY = startY + (target.y - startY) * easedProgress;
+                block.position.x = target.x + currentRadius * Math.cos(currentAngle);
+                block.position.z = target.z + currentRadius * Math.sin(currentAngle);
+                block.position.y = currentY;
+                block.rotation.y = currentAngle;
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    block.rotation.set(0, 0, 0);
+                    block.position.set(target.x, target.y, target.z);
+                }
+            }
+            animate();
+        }
+        
+        function animateRainDown(block, targetY) {
+            let progress = 0;
+            const duration = 500 / animationSpeed;
+            const startTime = Date.now();
+            const startY = block.position.y;
+            
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                block.position.y = startY + (targetY - startY) * easedProgress;
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                }
+            }
+            animate();
+        }
+        
+        function animateGroundUp(block, targetY) {
+            let progress = 0;
+            const duration = 600 / animationSpeed;
+            const startTime = Date.now();
+            const startY = block.position.y;
+            
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                block.position.y = startY + (targetY - startY) * easedProgress;
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                }
+            }
+            animate();
+        }
+        
+        function animateAssemble(block, targetX) {
+            let progress = 0;
+            const duration = 400 / animationSpeed;
+            const startTime = Date.now();
+            const startX = block.position.x;
+            
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = progress * progress;
+                block.position.x = startX + (targetX - startX) * easedProgress;
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                }
+            }
+            animate();
+        }
+        
+        function animateSimple(block) {
+            let progress = 0;
+            const duration = 100 / animationSpeed;
             const startTime = Date.now();
             
-            function updateAnimation() {
-                if (!isPlaying) {
-                    onComplete();
+            function animate() {
+                if (!isPlaying) return;
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                block.scale.set(progress, progress, progress);
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                }
+            }
+            animate();
+        }
+        
+        function animateLayerScan() {
+            let layerIndex = 0;
+            
+            function buildNextLayer() {
+                if (!isPlaying || layerIndex >= partGroups.length) {
+                    stopAnimation();
                     return;
                 }
                 
-                const elapsed = Date.now() - startTime;
-                const progress = Math.min(1, elapsed / duration);
-                const eased = easeOutCubic(progress);
-                
-                meshes.forEach(mesh => {
-                    const target = mesh.userData.target;
-                    
-                    switch (effect) {
-                        case 'fade':
-                            mesh.material.opacity = eased;
-                            break;
-                        case 'rise':
-                            mesh.position.y = (target.y - 10) * (1 - eased) + target.y * eased;
-                            break;
-                        case 'fall':
-                            mesh.position.y = (target.y + 20) * (1 - eased) + target.y * eased;
-                            break;
-                        case 'spiral':
-                            const scale = eased;
-                            mesh.scale.set(scale, scale, scale);
-                            mesh.rotation.y = mesh.userData.angle * (1 - eased);
-                            break;
-                        case 'explode':
-                            mesh.position.x = mesh.position.x * (1 - eased) + target.x * eased;
-                            mesh.position.y = mesh.position.y * (1 - eased) + target.y * eased;
-                            mesh.position.z = mesh.position.z * (1 - eased) + target.z * eased;
-                            break;
-                    }
+                const region = partGroups[layerIndex];
+                region.voxels.forEach(voxel => {
+                    const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
+                    const baseColor = new THREE.Color(0x808080);
+                    const block = createAnimatedBlock(blockData, baseColor, 'simple');
+                    applyMagicTheme(block, blockData, currentMagicTheme);
                 });
                 
-                if (progress < 1) {
-                    requestAnimationFrame(updateAnimation);
-                } else {
-                    // 确保所有方块都在正确位置
-                    meshes.forEach(mesh => {
-                        const target = mesh.userData.target;
-                        mesh.position.set(target.x, target.y, target.z);
-                        mesh.scale.set(1, 1, 1);
-                        mesh.rotation.set(0, 0, 0);
-                        if (mesh.material.transparent) {
-                            mesh.material.opacity = 1;
-                        }
-                    });
-                    onComplete();
-                }
+                layerIndex++;
+                setTimeout(buildNextLayer, 300 / animationSpeed);
             }
             
-            updateAnimation();
+            buildNextLayer();
+        }
+        
+        function animateRipple() {
+            // 按距离中心的距离分组
+            const distanceGroups = new Map();
+            
+            Object.entries(voxelData).forEach(([coordString, props]) => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const dist = Math.floor(Math.sqrt(x * x + z * z));
+                if (!distanceGroups.has(dist)) {
+                    distanceGroups.set(dist, []);
+                }
+                distanceGroups.get(dist).push({ x, y, z, props });
+            });
+            
+            const sortedDistances = Array.from(distanceGroups.keys()).sort((a, b) => a - b);
+            let distIndex = 0;
+            
+            function buildNextRipple() {
+                if (!isPlaying || distIndex >= sortedDistances.length) {
+                    stopAnimation();
+                    return;
+                }
+                
+                const dist = sortedDistances[distIndex];
+                const voxels = distanceGroups.get(dist);
+                
+                voxels.forEach(voxel => {
+                    const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
+                    const baseColor = new THREE.Color(0x808080);
+                    const block = createAnimatedBlock(blockData, baseColor, 'ground-up');
+                    applyMagicTheme(block, blockData, currentMagicTheme);
+                });
+                
+                distIndex++;
+                setTimeout(buildNextRipple, 100 / animationSpeed);
+            }
+            
+            buildNextRipple();
         }
         
         function stopAnimation() {
@@ -575,26 +797,161 @@ RENDER_WINDOW_HTML = """
             document.getElementById('status').textContent = '动画已停止';
         }
         
-        function easeOutCubic(t) {
-            return 1 - Math.pow(1 - t, 3);
+        // ===========================
+        // 魔法主题系统
+        // ===========================
+        function applyMagicTheme(block, blockData, magicTheme) {
+            if (magicTheme === 'none') return;
+            
+            emitParticles(blockData, magicTheme);
+            animateGlow(block, magicTheme);
         }
         
-        function getMaterialForVoxel(props) {
-            // 简单的材质映射，根据blockId返回材质
-            // 这里可以扩展以支持更多材质
-            const blockId = props.blockId || 0;
-            const metaData = props.metaData || 0;
+        function animateGlow(block, theme) {
+            if (!block.material || !block.material.clone) return;
             
-            // 根据blockId判断材质类型
-            if (blockId === 2 || blockId === 0) { // 草方块
+            // 只为非数组材质克隆（草方块是数组）
+            if (!Array.isArray(block.material)) {
+                block.material = block.material.clone();
+            } else {
+                return; // 跳过数组材质的发光效果
+            }
+            
+            let emissiveColor;
+            switch (theme) {
+                case 'fire': emissiveColor = 0xff8800; break;
+                case 'ice': emissiveColor = 0x88ccff; break;
+                case 'shadow': emissiveColor = 0xcc88ff; break;
+                case 'rune-energy':
+                default: emissiveColor = 0x88ff88; break;
+            }
+            
+            block.material.emissive = new THREE.Color(emissiveColor);
+            block.material.emissiveIntensity = 0;
+            
+            let progress = 0;
+            const duration = 800;
+            const startTime = Date.now();
+            
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                if (progress < 0.5) {
+                    block.material.emissiveIntensity = progress * 2;
+                } else {
+                    block.material.emissiveIntensity = (1 - progress) * 2;
+                }
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    block.material.emissiveIntensity = 0;
+                }
+            }
+            animate();
+        }
+        
+        function emitParticles(blockData, theme) {
+            const numToEmit = Math.floor((particleDensity / 100) * MAX_PARTICLES_PER_BLOCK);
+            if (numToEmit === 0) return;
+            
+            let colorBase, velY, life, gravity;
+            switch (theme) {
+                case 'fire':
+                    colorBase = 0xff8800; velY = [0.08, 0.12]; life = [0.6, 1.0]; gravity = 0.0005;
+                    break;
+                case 'ice':
+                    colorBase = 0x88ccff; velY = [0.01, 0.05]; life = [1.0, 1.5]; gravity = 0.0015;
+                    break;
+                case 'shadow':
+                    colorBase = 0xcc88ff; velY = [0.03, 0.08]; life = [1.0, 1.2]; gravity = 0.0008;
+                    break;
+                case 'rune-energy':
+                default:
+                    colorBase = 0x88ff88; velY = [0.08, 0.12]; life = [0.8, 1.2]; gravity = 0.001;
+                    break;
+            }
+            
+            const halfGrid = GRID_SIZE / 2;
+            const worldX = -halfGrid + (blockData.x + 0.5) * VOXEL_SIZE;
+            const worldY = (blockData.y + 0.5) * VOXEL_SIZE;
+            const worldZ = -halfGrid + (blockData.z + 0.5) * VOXEL_SIZE;
+            
+            for (let i = 0; i < numToEmit; i++) {
+                let foundParticle = false;
+                for (let j = 0; j < particles.length; j++) {
+                    if (particles[j].life <= 0) {
+                        const p = particles[j];
+                        p.position.set(worldX, worldY, worldZ);
+                        p.velocity.set((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05);
+                        p.color = new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3);
+                        p.maxLife = p.life = life[0] + Math.random() * (life[1] - life[0]);
+                        p.size = 1 + Math.random() * 2;
+                        p.gravity = gravity;
+                        foundParticle = true;
+                        break;
+                    }
+                }
+                if (!foundParticle && particles.length < 2000) {
+                    const p = {
+                        position: new THREE.Vector3(worldX, worldY, worldZ),
+                        velocity: new THREE.Vector3((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05),
+                        color: new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3),
+                        maxLife: life[0] + Math.random() * (life[1] - life[0]),
+                        life: life[0] + Math.random() * (life[1] - life[0]),
+                        size: 1 + Math.random() * 2,
+                        opacity: 1,
+                        gravity: gravity
+                    };
+                    particles.push(p);
+                }
+            }
+        }
+        
+        function updateParticles() {
+            const positions = particleSystem.geometry.attributes.position.array;
+            const colors = particleSystem.geometry.attributes.color.array;
+            const sizes = particleSystem.geometry.attributes.size.array;
+            
+            for (let i = 0; i < particles.length; i++) {
+                const p = particles[i];
+                if (p.life <= 0) continue;
+                
+                p.velocity.y -= p.gravity;
+                p.position.add(p.velocity);
+                p.life -= 0.01;
+                p.opacity = p.life / p.maxLife;
+                
+                if (p.life <= 0) {
+                    positions[i * 3 + 1] = -100;
+                } else {
+                    positions[i * 3] = p.position.x;
+                    positions[i * 3 + 1] = p.position.y;
+                    positions[i * 3 + 2] = p.position.z;
+                    colors[i * 3] = p.color.r * p.opacity;
+                    colors[i * 3 + 1] = p.color.g * p.opacity;
+                    colors[i * 3 + 2] = p.color.b * p.opacity;
+                    sizes[i] = p.size * p.opacity;
+                }
+            }
+            
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+            particleSystem.geometry.attributes.size.needsUpdate = true;
+        }
+        
+        function getMaterialForVoxel(blockData) {
+            // 简单的材质映射
+            const blockId = blockData.blockId || 0;
+            
+            if (blockId === 2 || blockId === 0) {
                 return blockMaterials.grass;
-            } else if (blockId === 3) { // 泥土
+            } else if (blockId === 3) {
                 return blockMaterials.dirt;
-            } else if (blockId === 1) { // 石头
+            } else if (blockId === 1) {
                 return blockMaterials.stone;
-            } else if (blockId === 5 || blockId === 17) { // 木头
+            } else if (blockId === 5 || blockId === 17) {
                 return blockMaterials.wood;
-            } else if (blockId === 4) { // 鹅卵石
+            } else if (blockId === 4) {
                 return blockMaterials.cobblestone;
             }
             
@@ -615,11 +972,8 @@ RENDER_WINDOW_HTML = """
         function startRecording() {
             try {
                 recordedChunks = [];
+                canvasStream = renderer.domElement.captureStream(30);
                 
-                // 创建canvas stream
-                canvasStream = renderer.domElement.captureStream(30); // 30 fps
-                
-                // 创建MediaRecorder
                 const options = { mimeType: 'video/webm;codecs=vp9' };
                 if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                     options.mimeType = 'video/webm;codecs=vp8';
@@ -648,7 +1002,6 @@ RENDER_WINDOW_HTML = """
                 document.getElementById('record-btn').classList.add('recording');
                 document.getElementById('status').textContent = '正在录制...';
                 
-                // 自动开始播放动画
                 if (!isPlaying) {
                     playAnimation();
                 }
@@ -694,6 +1047,11 @@ RENDER_WINDOW_HTML = """
         // ===========================
         function animate() {
             requestAnimationFrame(animate);
+            
+            if (particleSystem.visible) {
+                updateParticles();
+            }
+            
             controls.update();
             renderer.render(scene, camera);
         }
@@ -709,8 +1067,8 @@ RENDER_WINDOW_HTML = """
     </script>
 </body>
 </html>
-"""
 
+"""
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -819,13 +1177,9 @@ HTML_CONTENT = """
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
-                <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
-                <button id="play-animation-btn" class="bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>播放动画</button>
-                <button id="open-render-window-btn" class="mt-1.5 bg-pink-600 hover:bg-pink-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>🎬 渲染窗口</button>
-                <div class="mt-2">
-                    <label for="animation-speed-slider" class="block text-xs font-medium text-gray-400">速度</label>
-                    <input type="range" id="animation-speed-slider" min="1" max="100" value="50" class="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer">
-                </div>
+                <h3 class="text-xs font-semibold mb-1 text-gray-300">建筑动画</h3>
+                <button id="open-render-window-btn" class="bg-pink-600 hover:bg-pink-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>🎬 打开渲染窗口</button>
+                <p class="text-xs text-gray-400 mt-2">在新窗口中制作和导出建筑动画视频</p>
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
@@ -2676,7 +3030,6 @@ ${historyString}
             });
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
-            document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
             document.getElementById('open-render-window-btn').addEventListener('click', openRenderWindow);
         });
 
@@ -2833,100 +3186,6 @@ ${historyString}
             
             // 打开新窗口
             window.open('/render-window', '_blank', 'width=1280,height=720');
-        }
-
-        async function playFallingAnimation() {
-            if (currentVoxelCoords.size === 0) return;
-
-            const playBtn = document.getElementById('play-animation-btn');
-            playBtn.disabled = true;
-            playBtn.textContent = '播放中...';
-
-            // Hide the main voxel group
-            voxelContainerGroup.visible = false;
-
-            const voxels = Array.from(currentVoxelCoords).map(coordString => {
-                const [x, y, z] = coordString.split(',').map(Number);
-                const props = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
-                return { x, y, z, props };
-            });
-
-            // Sort voxels from bottom to top, then by x, then by z
-            voxels.sort((a, b) => a.y - b.y || a.x - b.x || a.z - b.z);
-
-            const animationGroup = new THREE.Group();
-            scene.add(animationGroup);
-
-            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
-
-            const speedSlider = document.getElementById('animation-speed-slider');
-            const maxDelay = 200; // Corresponds to speed 1
-            const minDelay = 5;   // Corresponds to speed 100
-            const speedValue = parseInt(speedSlider.value, 10);
-            // Inverse mapping: lower slider value means higher delay
-            const delayBetweenVoxels = maxDelay - ((speedValue - 1) / 99) * (maxDelay - minDelay);
-
-
-            for (let i = 0; i < voxels.length; i++) {
-                const voxel = voxels[i];
-                const halfGrid = GRID_SIZE / 2;
-                const targetX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
-                const targetY = (voxel.y + 0.5) * VOXEL_SIZE;
-                const targetZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
-                const startY = GRID_SIZE * 1.5;
-
-                const textureKey = getTextureKeyForVoxel(voxel.props.blockId, voxel.props.metaData, DEFAULT_BLOCK_ID_LIST);
-                const texture = loadedTextures.get(textureKey);
-                const material = texture ?
-                    new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 }) :
-                    new THREE.MeshLambertMaterial({ color: TEXTURE_KEY_TO_COLOR_MAP[textureKey] || 0xff00ff });
-
-                const mesh = new THREE.Mesh(baseVoxelGeometry, material);
-                mesh.castShadow = true;
-                mesh.receiveShadow = true;
-                mesh.position.set(targetX, startY, targetZ);
-                animationGroup.add(mesh);
-
-                // Animate the fall
-                setTimeout(() => {
-                    const fallDuration = 500 + Math.random() * 300; // Duration of fall in ms
-                    const startTime = Date.now();
-
-                    function animateFall() {
-                        const elapsedTime = Date.now() - startTime;
-                        let t = elapsedTime / fallDuration;
-                        t = t < 1 ? t : 1; // Clamp t to 1
-
-                        // Ease-out cubic interpolation
-                        const easedT = 1 - Math.pow(1 - t, 3);
-
-                        mesh.position.y = startY * (1 - easedT) + targetY * easedT;
-
-                        if (t < 1) {
-                            requestAnimationFrame(animateFall);
-                        } else {
-                            mesh.position.y = targetY; // Ensure it lands exactly
-                        }
-                    }
-                    animateFall();
-                }, i * delayBetweenVoxels);
-            }
-
-            // Cleanup after animation completes
-            setTimeout(() => {
-                scene.remove(animationGroup);
-                animationGroup.children.forEach(child => {
-                    child.geometry.dispose();
-                    if (Array.isArray(child.material)) {
-                        child.material.forEach(m => m.dispose());
-                    } else {
-                        child.material.dispose();
-                    }
-                });
-                voxelContainerGroup.visible = true;
-                playBtn.disabled = false;
-                playBtn.textContent = '播放动画';
-            }, voxels.length * delayBetweenVoxels + 1000); // Wait for all animations to finish + buffer
         }
 
         async function applySaveData(saveData) {
