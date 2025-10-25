@@ -161,6 +161,7 @@ RENDER_WINDOW_HTML = """
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
     <style>
         body { margin: 0; padding: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #87CEEB; }
         canvas { display: block; }
@@ -256,6 +257,29 @@ RENDER_WINDOW_HTML = """
         let recordedChunks = [];
         let isRecording = false;
         let canvasStream = null;
+        let recordedMimeType = 'video/mp4';
+        
+        // 纹理与材质缓存
+        let renderTextureData = {};
+        const textureLoader = new THREE.TextureLoader();
+        const textureCache = new Map();
+        const FALLBACK_COLOR_MAP = {
+            stone: 0x808080,
+            cobblestone: 0x7a7a7a,
+            dirt: 0x8b5a2b,
+            planks_oak: 0xaf8f58,
+            planks_spruce: 0x806038,
+            planks_birch: 0xdace9b,
+            planks_jungle: 0xac7d5a,
+            planks_acacia: 0xad6c49,
+            planks_big_oak: 0x4c331e,
+            log_oak: 0x685133,
+            log_spruce: 0x513f27,
+            log_birch: 0xd0cbb0,
+            log_jungle: 0x584c24
+        };
+        let ffmpegInstance = null;
+        let ffmpegLoadingPromise = null;
         
         // 材质相关 - 复制主窗口的纹理生成逻辑
         const VOXEL_SIZE = 1;
@@ -296,23 +320,6 @@ RENDER_WINDOW_HTML = """
                     : `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`
         );
         
-        // 方块材质映射（扩展）
-        const blockMaterials = {
-            'grass': [
-                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
-                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
-                new THREE.MeshLambertMaterial({ map: grassTopTexture }),
-                new THREE.MeshLambertMaterial({ map: dirtTexture }),
-                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
-                new THREE.MeshLambertMaterial({ map: grassSideTexture })
-            ],
-            'dirt': new THREE.MeshLambertMaterial({ map: dirtTexture }),
-            'stone': new THREE.MeshLambertMaterial({ color: 0x808080 }),
-            'wood': new THREE.MeshLambertMaterial({ color: 0x8b5a2b }),
-            'cobblestone': new THREE.MeshLambertMaterial({ color: 0x808080 }),
-            'default': new THREE.MeshLambertMaterial({ color: 0xff00ff })
-        };
-        
         // ===========================
         // 初始化
         // ===========================
@@ -328,6 +335,19 @@ RENDER_WINDOW_HTML = """
             
             voxelData = JSON.parse(voxelDataStr);
             modelParts = modelPartsStr ? JSON.parse(modelPartsStr) : [];
+
+            const textureDataStr = sessionStorage.getItem('renderTextureData');
+            if (textureDataStr) {
+                try {
+                    renderTextureData = JSON.parse(textureDataStr);
+                } catch (error) {
+                    console.warn('无法解析渲染纹理数据:', error);
+                    renderTextureData = {};
+                }
+            } else {
+                renderTextureData = {};
+            }
+            textureCache.clear();
             
             // 创建场景
             const mount = document.getElementById('mount');
@@ -399,7 +419,8 @@ RENDER_WINDOW_HTML = """
         function createGround() {
             const groundSize = 50;
             const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
-            const groundMesh = new THREE.InstancedMesh(blockGeometry, blockMaterials.grass, groundSize * groundSize);
+            const groundMaterials = createGrassMaterialSet();
+            const groundMesh = new THREE.InstancedMesh(blockGeometry, groundMaterials, groundSize * groundSize);
             
             const dummy = new THREE.Object3D();
             let index = 0;
@@ -429,31 +450,69 @@ RENDER_WINDOW_HTML = """
         }
         
         function groupVoxelsByRegions() {
-            // 按Y轴分组（每层作为一个区域）
-            const layers = new Map();
-            
+            const partMeta = new Map();
+            modelParts.forEach((part, index) => {
+                partMeta.set(part.uuid, {
+                    name: part.name || `零件 ${index + 1}`,
+                    order: index
+                });
+            });
+
+            const groupedByPart = new Map();
+            const fallbackLayers = new Map();
+
             Object.entries(voxelData).forEach(([coordString, props]) => {
                 const [x, y, z] = coordString.split(',').map(Number);
-                if (!layers.has(y)) {
-                    layers.set(y, []);
+                const entry = { x, y, z, props, coordString };
+                const partInfo = props?.partId ? partMeta.get(props.partId) : null;
+
+                if (partInfo) {
+                    if (!groupedByPart.has(props.partId)) {
+                        groupedByPart.set(props.partId, { name: partInfo.name, order: partInfo.order, voxels: [] });
+                    }
+                    groupedByPart.get(props.partId).voxels.push(entry);
+                } else {
+                    if (!fallbackLayers.has(y)) {
+                        fallbackLayers.set(y, []);
+                    }
+                    fallbackLayers.get(y).push(entry);
                 }
-                layers.get(y).push({ x, y, z, props, coordString });
             });
-            
-            // 转换为数组并排序
-            partGroups = Array.from(layers.entries())
-                .sort((a, b) => a[0] - b[0]) // 按Y轴从低到高排序
-                .map(([yLevel, voxels]) => ({
-                    name: `层级 ${yLevel}`,
-                    yLevel,
-                    voxels,
-                    effect: 'magic-gradient' // 默认效果
-                }));
+
+            const groups = Array.from(groupedByPart.entries()).map(([partId, data]) => ({
+                id: partId,
+                name: data.name,
+                order: data.order,
+                voxels: data.voxels,
+                effect: 'magic-gradient'
+            }));
+
+            if (fallbackLayers.size > 0) {
+                Array.from(fallbackLayers.entries()).forEach(([yLevel, voxels]) => {
+                    groups.push({
+                        id: `layer-${yLevel}`,
+                        name: `层级 ${yLevel}`,
+                        order: modelParts.length + yLevel,
+                        voxels,
+                        effect: 'magic-gradient'
+                    });
+                });
+            }
+
+            partGroups = groups.sort((a, b) => a.order - b.order);
         }
         
         function generatePartControls() {
             const partsList = document.getElementById('parts-list');
             partsList.innerHTML = '<h3 class="text-sm font-semibold mb-2">区域/零件</h3>';
+
+            if (partGroups.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-xs text-gray-400';
+                empty.textContent = '暂无可动画的区域。';
+                partsList.appendChild(empty);
+                return;
+            }
             
             partGroups.forEach((group, index) => {
                 const div = document.createElement('div');
@@ -470,7 +529,9 @@ RENDER_WINDOW_HTML = """
                     </select>
                 `;
                 
-                div.querySelector('select').addEventListener('change', (e) => {
+                const selectEl = div.querySelector('select');
+                selectEl.value = group.effect || 'magic-gradient';
+                selectEl.addEventListener('change', (e) => {
                     partGroups[index].effect = e.target.value;
                 });
                 
@@ -490,9 +551,8 @@ RENDER_WINDOW_HTML = """
             document.getElementById('status').textContent = '正在播放动画...';
             
             // 清除现有方块
-            while (blockGroup.children.length > 0) {
-                blockGroup.remove(blockGroup.children[0]);
-            }
+            clearBlockGroup();
+            resetParticleSystem();
             
             // 根据魔法主题和密度决定粒子系统是否可见
             particleSystem.visible = (currentMagicTheme !== 'none' && particleDensity > 0);
@@ -510,9 +570,51 @@ RENDER_WINDOW_HTML = """
             }
         }
         
+        function clearBlockGroup() {
+            while (blockGroup.children.length > 0) {
+                const child = blockGroup.children[0];
+                blockGroup.remove(child);
+                if (child.geometry && typeof child.geometry.dispose === 'function') {
+                    child.geometry.dispose();
+                }
+                if (Array.isArray(child.material)) {
+                    child.material.forEach(mat => {
+                        if (mat && typeof mat.dispose === 'function') {
+                            mat.dispose();
+                        }
+                    });
+                } else if (child.material && typeof child.material.dispose === 'function') {
+                    child.material.dispose();
+                }
+            }
+        }
+
+        function resetParticleSystem() {
+            if (!particleSystem) return;
+            particles.length = 0;
+            const positions = particleSystem.geometry.attributes.position.array;
+            const colors = particleSystem.geometry.attributes.color.array;
+            const sizes = particleSystem.geometry.attributes.size.array;
+            for (let i = 0; i < sizes.length; i++) {
+                positions[i * 3] = 0;
+                positions[i * 3 + 1] = -100;
+                positions[i * 3 + 2] = 0;
+                colors[i * 3] = 0;
+                colors[i * 3 + 1] = 0;
+                colors[i * 3 + 2] = 0;
+                sizes[i] = 0;
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+            particleSystem.geometry.attributes.size.needsUpdate = true;
+        }
+        
         function animateRegions(regionIndex, effectOverride = null) {
-            if (!isPlaying || regionIndex >= partGroups.length) {
-                stopAnimation();
+            if (!isPlaying) {
+                return;
+            }
+            if (regionIndex >= partGroups.length) {
+                finishAnimation();
                 return;
             }
             
@@ -520,7 +622,6 @@ RENDER_WINDOW_HTML = """
             const effect = effectOverride || region.effect;
             const delay = 1000 / animationSpeed;
             
-            // 播放区域动画
             animateRegionBlocks(region, effect, () => {
                 setTimeout(() => {
                     animateRegions(regionIndex + 1, effectOverride);
@@ -532,18 +633,23 @@ RENDER_WINDOW_HTML = """
             const voxels = region.voxels;
             
             voxels.forEach(voxel => {
-                const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
-                const baseColor = new THREE.Color(0x808080); // 默认颜色
+                const blockData = {
+                    x: voxel.x,
+                    y: voxel.y,
+                    z: voxel.z,
+                    blockId: voxel.props?.blockId ?? 0,
+                    metaData: voxel.props?.metaData ?? 0,
+                    partId: voxel.props?.partId ?? null
+                };
                 
-                const block = createAnimatedBlock(blockData, baseColor, effect);
+                const block = createAnimatedBlock(blockData, effect);
                 applyMagicTheme(block, blockData, currentMagicTheme);
             });
             
-            // 等待动画完成
             setTimeout(onComplete, 1000 / animationSpeed);
         }
         
-        function createAnimatedBlock(blockData, baseColor, effect) {
+        function createAnimatedBlock(blockData, effect) {
             const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
             const material = getMaterialForVoxel(blockData);
             const block = new THREE.Mesh(blockGeometry, material);
@@ -559,10 +665,7 @@ RENDER_WINDOW_HTML = """
                 case 'magic-gradient':
                     block.position.set(targetX, targetY, targetZ);
                     block.scale.set(0.8, 0.8, 0.8);
-                    if (material.transparent === undefined) {
-                        material.transparent = true;
-                        material.opacity = 0.01;
-                    }
+                    prepareMaterialForFade(block.material);
                     animateMagicGradient(block);
                     break;
                 case 'vortex':
@@ -576,11 +679,12 @@ RENDER_WINDOW_HTML = """
                     block.position.set(targetX, -5, targetZ);
                     animateGroundUp(block, targetY);
                     break;
-                case 'assemble':
+                case 'assemble': {
                     const startX = blockData.x > 0 ? targetX + 15 : targetX - 15;
                     block.position.set(startX, targetY, targetZ);
                     animateAssemble(block, targetX);
                     break;
+                }
                 case 'simple':
                 default:
                     block.position.set(targetX, targetY, targetZ);
@@ -593,28 +697,48 @@ RENDER_WINDOW_HTML = """
             return block;
         }
         
+        function prepareMaterialForFade(material) {
+            if (Array.isArray(material)) {
+                material.forEach(mat => {
+                    if (!mat) return;
+                    mat.transparent = true;
+                    mat.opacity = 0.01;
+                });
+            } else if (material) {
+                material.transparent = true;
+                material.opacity = 0.01;
+            }
+        }
+        
         function animateMagicGradient(block) {
             let progress = 0;
             const duration = 1000 / animationSpeed;
             const startTime = Date.now();
             const startScale = block.scale.clone();
             const targetScale = new THREE.Vector3(1, 1, 1);
+
+            const setOpacity = (value) => {
+                if (Array.isArray(block.material)) {
+                    block.material.forEach(mat => {
+                        if (!mat) return;
+                        mat.opacity = value;
+                    });
+                } else if (block.material) {
+                    block.material.opacity = value;
+                }
+            };
             
             function animate() {
                 if (!isPlaying) return;
                 const elapsed = Date.now() - startTime;
                 progress = Math.min(1, elapsed / duration);
                 const easedProgress = Math.pow(progress, 2);
-                if (block.material.opacity !== undefined) {
-                    block.material.opacity = 0.01 + 0.99 * easedProgress;
-                }
+                setOpacity(0.01 + 0.99 * easedProgress);
                 block.scale.lerpVectors(startScale, targetScale, easedProgress);
                 if (progress < 1) {
                     requestAnimationFrame(animate);
                 } else {
-                    if (block.material.opacity !== undefined) {
-                        block.material.opacity = 1;
-                    }
+                    setOpacity(1);
                     block.scale.set(1, 1, 1);
                 }
             }
@@ -728,19 +852,38 @@ RENDER_WINDOW_HTML = """
         }
         
         function animateLayerScan() {
+            const layers = new Map();
+            Object.entries(voxelData).forEach(([coordString, props]) => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                if (!layers.has(y)) {
+                    layers.set(y, []);
+                }
+                layers.get(y).push({ x, y, z, props });
+            });
+
+            const sortedLayers = Array.from(layers.keys()).sort((a, b) => a - b);
             let layerIndex = 0;
             
             function buildNextLayer() {
-                if (!isPlaying || layerIndex >= partGroups.length) {
-                    stopAnimation();
+                if (!isPlaying) {
+                    return;
+                }
+                if (layerIndex >= sortedLayers.length) {
+                    finishAnimation();
                     return;
                 }
                 
-                const region = partGroups[layerIndex];
-                region.voxels.forEach(voxel => {
-                    const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
-                    const baseColor = new THREE.Color(0x808080);
-                    const block = createAnimatedBlock(blockData, baseColor, 'simple');
+                const voxels = layers.get(sortedLayers[layerIndex]);
+                voxels.forEach(voxel => {
+                    const blockData = {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                        blockId: voxel.props?.blockId ?? 0,
+                        metaData: voxel.props?.metaData ?? 0,
+                        partId: voxel.props?.partId ?? null
+                    };
+                    const block = createAnimatedBlock(blockData, 'simple');
                     applyMagicTheme(block, blockData, currentMagicTheme);
                 });
                 
@@ -752,7 +895,6 @@ RENDER_WINDOW_HTML = """
         }
         
         function animateRipple() {
-            // 按距离中心的距离分组
             const distanceGroups = new Map();
             
             Object.entries(voxelData).forEach(([coordString, props]) => {
@@ -768,18 +910,26 @@ RENDER_WINDOW_HTML = """
             let distIndex = 0;
             
             function buildNextRipple() {
-                if (!isPlaying || distIndex >= sortedDistances.length) {
-                    stopAnimation();
+                if (!isPlaying) {
+                    return;
+                }
+                if (distIndex >= sortedDistances.length) {
+                    finishAnimation();
                     return;
                 }
                 
-                const dist = sortedDistances[distIndex];
-                const voxels = distanceGroups.get(dist);
+                const voxels = distanceGroups.get(sortedDistances[distIndex]);
                 
                 voxels.forEach(voxel => {
-                    const blockData = { x: voxel.x, y: voxel.y, z: voxel.z, type: 'default' };
-                    const baseColor = new THREE.Color(0x808080);
-                    const block = createAnimatedBlock(blockData, baseColor, 'ground-up');
+                    const blockData = {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                        blockId: voxel.props?.blockId ?? 0,
+                        metaData: voxel.props?.metaData ?? 0,
+                        partId: voxel.props?.partId ?? null
+                    };
+                    const block = createAnimatedBlock(blockData, 'ground-up');
                     applyMagicTheme(block, blockData, currentMagicTheme);
                 });
                 
@@ -791,10 +941,30 @@ RENDER_WINDOW_HTML = """
         }
         
         function stopAnimation() {
+            if (isRecording) {
+                stopRecording();
+            }
             isPlaying = false;
+            particleSystem.visible = false;
+            resetParticleSystem();
             document.getElementById('play-btn').disabled = false;
             document.getElementById('stop-btn').disabled = true;
             document.getElementById('status').textContent = '动画已停止';
+        }
+
+        function finishAnimation() {
+            const statusEl = document.getElementById('status');
+            if (isRecording) {
+                stopRecording();
+                statusEl.textContent = '动画完成，录制处理中...';
+            } else {
+                statusEl.textContent = '动画完成';
+            }
+            isPlaying = false;
+            particleSystem.visible = false;
+            resetParticleSystem();
+            document.getElementById('play-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
         }
         
         // ===========================
@@ -940,22 +1110,77 @@ RENDER_WINDOW_HTML = """
         }
         
         function getMaterialForVoxel(blockData) {
-            // 简单的材质映射
-            const blockId = blockData.blockId || 0;
-            
-            if (blockId === 2 || blockId === 0) {
-                return blockMaterials.grass;
-            } else if (blockId === 3) {
-                return blockMaterials.dirt;
-            } else if (blockId === 1) {
-                return blockMaterials.stone;
-            } else if (blockId === 5 || blockId === 17) {
-                return blockMaterials.wood;
-            } else if (blockId === 4) {
-                return blockMaterials.cobblestone;
+            const blockId = blockData.blockId ?? 0;
+            const meta = blockData.metaData ?? 0;
+
+            switch (blockId) {
+                case 2:
+                case 0:
+                    return createGrassMaterialSet();
+                case 3:
+                    return createMaterialFromTextureKey('dirt', FALLBACK_COLOR_MAP.dirt);
+                case 1:
+                    return createMaterialFromTextureKey('stone', FALLBACK_COLOR_MAP.stone);
+                case 4:
+                    return createMaterialFromTextureKey('cobblestone', FALLBACK_COLOR_MAP.cobblestone);
+                case 5: {
+                    const metaMap = { 1: 'planks_spruce', 2: 'planks_birch', 3: 'planks_jungle', 4: 'planks_acacia', 5: 'planks_big_oak' };
+                    const key = metaMap[meta] || 'planks_oak';
+                    return createMaterialFromTextureKey(key, FALLBACK_COLOR_MAP[key] ?? FALLBACK_COLOR_MAP.planks_oak);
+                }
+                case 17: {
+                    const metaMap = { 1: 'log_spruce', 2: 'log_birch', 3: 'log_jungle' };
+                    const key = metaMap[meta] || 'log_oak';
+                    return createMaterialFromTextureKey(key, FALLBACK_COLOR_MAP[key] ?? FALLBACK_COLOR_MAP.log_oak);
+                }
+                default:
+                    return new THREE.MeshLambertMaterial({ color: 0x808080 });
             }
-            
-            return blockMaterials.default;
+        }
+
+        function getTextureForKey(key) {
+            if (!renderTextureData || !renderTextureData[key]) {
+                return null;
+            }
+            if (textureCache.has(key)) {
+                return textureCache.get(key);
+            }
+            const texture = textureLoader.load(renderTextureData[key]);
+            texture.magFilter = THREE.NearestFilter;
+            texture.minFilter = THREE.NearestFilter;
+            textureCache.set(key, texture);
+            return texture;
+        }
+
+        function createMaterialFromTextureKey(key, fallbackColor = 0x808080) {
+            const texture = getTextureForKey(key);
+            if (texture) {
+                return new THREE.MeshLambertMaterial({ map: texture });
+            }
+            switch (key) {
+                case 'grass_top':
+                    return new THREE.MeshLambertMaterial({ map: grassTopTexture });
+                case 'grass_side':
+                    return new THREE.MeshLambertMaterial({ map: grassSideTexture });
+                case 'dirt':
+                    return new THREE.MeshLambertMaterial({ map: dirtTexture });
+                default:
+                    return new THREE.MeshLambertMaterial({ color: fallbackColor });
+            }
+        }
+
+        function createGrassMaterialSet() {
+            const sideTexture = getTextureForKey('grass_side') || grassSideTexture;
+            const topTexture = getTextureForKey('grass_top') || grassTopTexture;
+            const bottomTexture = getTextureForKey('dirt') || dirtTexture;
+            return [
+                new THREE.MeshLambertMaterial({ map: sideTexture }),
+                new THREE.MeshLambertMaterial({ map: sideTexture }),
+                new THREE.MeshLambertMaterial({ map: topTexture }),
+                new THREE.MeshLambertMaterial({ map: bottomTexture }),
+                new THREE.MeshLambertMaterial({ map: sideTexture }),
+                new THREE.MeshLambertMaterial({ map: sideTexture })
+            ];
         }
         
         // ===========================
@@ -973,16 +1198,29 @@ RENDER_WINDOW_HTML = """
             try {
                 recordedChunks = [];
                 canvasStream = renderer.domElement.captureStream(30);
+                document.getElementById('save-mp4-btn').disabled = true;
                 
-                const options = { mimeType: 'video/webm;codecs=vp9' };
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'video/webm;codecs=vp8';
+                const preferredTypes = [
+                    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+                    'video/mp4',
+                    'video/webm;codecs=vp9',
+                    'video/webm;codecs=vp8',
+                    'video/webm'
+                ];
+                let selectedType = '';
+                for (const type of preferredTypes) {
+                    if (MediaRecorder.isTypeSupported(type)) {
+                        selectedType = type;
+                        break;
+                    }
                 }
-                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options.mimeType = 'video/webm';
+                if (!selectedType) {
+                    document.getElementById('status').textContent = '录制失败：当前浏览器不支持所需的视频编码。';
+                    return;
                 }
-                
-                mediaRecorder = new MediaRecorder(canvasStream, options);
+
+                recordedMimeType = selectedType;
+                mediaRecorder = new MediaRecorder(canvasStream, { mimeType: selectedType });
                 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0) {
@@ -991,8 +1229,19 @@ RENDER_WINDOW_HTML = """
                 };
                 
                 mediaRecorder.onstop = () => {
+                    mediaRecorder = null;
+                    isRecording = false;
+                    if (canvasStream) {
+                        canvasStream.getTracks().forEach(track => track.stop());
+                        canvasStream = null;
+                    }
                     document.getElementById('save-mp4-btn').disabled = false;
-                    document.getElementById('status').textContent = '录制完成，可以保存MP4';
+                    const statusEl = document.getElementById('status');
+                    if (recordedMimeType.includes('mp4')) {
+                        statusEl.textContent = '录制完成，可以保存 MP4';
+                    } else {
+                        statusEl.textContent = '录制完成，可转换为 MP4';
+                    }
                 };
                 
                 mediaRecorder.start();
@@ -1014,32 +1263,80 @@ RENDER_WINDOW_HTML = """
         function stopRecording() {
             if (mediaRecorder && isRecording) {
                 mediaRecorder.stop();
-                isRecording = false;
-                
-                document.getElementById('record-btn').textContent = '⏺ 录制';
-                document.getElementById('record-btn').classList.remove('recording');
             }
+            isRecording = false;
+            document.getElementById('record-btn').textContent = '⏺ 录制';
+            document.getElementById('record-btn').classList.remove('recording');
         }
         
-        function saveMP4() {
+        async function saveMP4() {
             if (recordedChunks.length === 0) {
                 alert('没有可保存的录制数据');
                 return;
             }
-            
-            const blob = new Blob(recordedChunks, { type: 'video/webm' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `building_animation_${Date.now()}.webm`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            document.getElementById('status').textContent = '视频已保存';
-            document.getElementById('save-mp4-btn').disabled = true;
-            recordedChunks = [];
+
+            const saveBtn = document.getElementById('save-mp4-btn');
+            const statusEl = document.getElementById('status');
+            saveBtn.disabled = true;
+
+            try {
+                const blobType = (recordedMimeType || 'video/webm').split(';')[0];
+                let blob = new Blob(recordedChunks, { type: blobType });
+                if (!recordedMimeType.includes('mp4')) {
+                    statusEl.textContent = '正在转换为 MP4...';
+                    blob = await convertRecordingToMp4(blob);
+                }
+
+                const downloadUrl = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `building_animation_${Date.now()}.mp4`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(downloadUrl);
+
+                statusEl.textContent = '视频已保存';
+                recordedChunks = [];
+            } catch (error) {
+                console.error('保存 MP4 时出错:', error);
+                statusEl.textContent = `保存 MP4 失败: ${error.message || error}`;
+                saveBtn.disabled = false;
+                return;
+            }
+        }
+
+        async function ensureFfmpeg() {
+            if (ffmpegInstance) {
+                return ffmpegInstance;
+            }
+            if (!ffmpegLoadingPromise) {
+                if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
+                    throw new Error('FFmpeg 库未正确加载。');
+                }
+                const { createFFmpeg } = window.FFmpeg;
+                ffmpegLoadingPromise = (async () => {
+                    const instance = createFFmpeg({ log: false });
+                    await instance.load();
+                    ffmpegInstance = instance;
+                    return instance;
+                })().catch(error => {
+                    ffmpegLoadingPromise = null;
+                    throw error;
+                });
+            }
+            return ffmpegLoadingPromise;
+        }
+
+        async function convertRecordingToMp4(blob) {
+            const ffmpeg = await ensureFfmpeg();
+            const { fetchFile } = window.FFmpeg;
+            ffmpeg.FS('writeFile', 'input.webm', await fetchFile(blob));
+            await ffmpeg.run('-i', 'input.webm', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p', 'output.mp4');
+            const data = ffmpeg.FS('readFile', 'output.mp4');
+            ffmpeg.FS('unlink', 'input.webm');
+            ffmpeg.FS('unlink', 'output.mp4');
+            return new Blob([data.buffer], { type: 'video/mp4' });
         }
         
         // ===========================
@@ -3171,20 +3468,78 @@ ${historyString}
             }
         }
 
+        function textureToDataUrl(texture) {
+            if (!texture || !texture.image) return null;
+            try {
+                const image = texture.image;
+                const width = image.width || image.videoWidth || image.naturalWidth || image.imageWidth || 0;
+                const height = image.height || image.videoHeight || image.naturalHeight || image.imageHeight || 0;
+                if (!width || !height) return null;
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(image, 0, 0, width, height);
+                return canvas.toDataURL('image/png');
+            } catch (error) {
+                console.warn('Failed to convert texture to data URL:', error);
+                return null;
+            }
+        }
+
+        function collectRenderTextureData() {
+            if (!loadedTextures || loadedTextures.size === 0) {
+                return null;
+            }
+
+            const textureData = {};
+            const seenKeys = new Set();
+
+            currentVoxelCoords.forEach(coordString => {
+                const props = voxelProperties.get(coordString);
+                if (!props) return;
+                const key = getTextureKeyForVoxel(props.blockId || 0, props.metaData || 0, DEFAULT_BLOCK_ID_LIST);
+                if (!key || seenKeys.has(key)) return;
+                if (loadedTextures.has(key)) {
+                    const dataUrl = textureToDataUrl(loadedTextures.get(key));
+                    if (dataUrl) {
+                        textureData[key] = dataUrl;
+                        seenKeys.add(key);
+                    }
+                }
+            });
+
+            const preferredKeys = ['grass_top', 'grass_side', 'dirt', 'stone', 'cobblestone', 'planks_oak', 'planks_spruce', 'planks_birch', 'planks_acacia', 'planks_big_oak', 'log_oak', 'log_spruce', 'log_birch', 'log_jungle'];
+            preferredKeys.forEach(key => {
+                if (textureData[key]) return;
+                if (loadedTextures.has(key)) {
+                    const dataUrl = textureToDataUrl(loadedTextures.get(key));
+                    if (dataUrl) {
+                        textureData[key] = dataUrl;
+                    }
+                }
+            });
+
+            return Object.keys(textureData).length > 0 ? textureData : null;
+        }
+
         function openRenderWindow() {
             if (currentVoxelCoords.size === 0) {
                 addAiChatMessage('system', '请先加载模型！');
                 return;
             }
             
-            // 准备体素数据
             const voxelData = getCurrentVoxelData();
-            
-            // 将数据保存到 sessionStorage 以便渲染窗口访问
             sessionStorage.setItem('renderVoxelData', JSON.stringify(voxelData));
             sessionStorage.setItem('renderModelParts', JSON.stringify(modelParts));
+
+            const textureData = collectRenderTextureData();
+            if (textureData) {
+                sessionStorage.setItem('renderTextureData', JSON.stringify(textureData));
+            } else {
+                sessionStorage.removeItem('renderTextureData');
+            }
             
-            // 打开新窗口
             window.open('/render-window', '_blank', 'width=1280,height=720');
         }
 
