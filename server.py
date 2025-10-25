@@ -149,6 +149,568 @@ def import_save_file(zip_path_or_url):
 # --- HTML/JavaScript 前端内容 ---
 # 将您的前端代码完整地嵌入到一个 Python 字符串中
 # 我已经修改了其中的 JavaScript 部分以与后端 API 通信
+
+# 渲染窗口HTML
+RENDER_WINDOW_HTML = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>建筑动画渲染窗口</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.net/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; background-color: #1f2937; }
+        canvas { display: block; }
+        #controls-panel { position: absolute; top: 20px; left: 20px; background: rgba(31, 41, 55, 0.95); padding: 20px; border-radius: 10px; color: white; max-width: 350px; max-height: calc(100vh - 40px); overflow-y: auto; }
+        #controls-panel::-webkit-scrollbar { width: 8px; }
+        #controls-panel::-webkit-scrollbar-track { background: #374151; border-radius: 4px; }
+        #controls-panel::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .part-control { background: rgba(55, 65, 81, 0.7); padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .recording { background-color: #dc2626 !important; }
+    </style>
+</head>
+<body>
+    <div id="mount"></div>
+    
+    <div id="controls-panel">
+        <h2 class="text-xl font-bold mb-4">🎬 建筑动画渲染</h2>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-semibold mb-2">全局动画效果</label>
+            <select id="global-effect" class="w-full p-2 bg-gray-700 rounded text-sm">
+                <option value="fade">淡入淡出</option>
+                <option value="rise">升起</option>
+                <option value="fall">下落</option>
+                <option value="spiral">螺旋</option>
+                <option value="explode">爆炸组装</option>
+            </select>
+        </div>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-semibold mb-2">动画速度</label>
+            <input type="range" id="speed-slider" min="0.1" max="3" step="0.1" value="1" class="w-full">
+            <span id="speed-value" class="text-xs text-gray-400">1.0x</span>
+        </div>
+        
+        <div id="parts-list" class="mb-4">
+            <h3 class="text-sm font-semibold mb-2">区域/零件</h3>
+            <!-- 动态生成 -->
+        </div>
+        
+        <div class="flex gap-2 mb-2">
+            <button id="play-btn" class="flex-1 bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-semibold">▶ 播放</button>
+            <button id="stop-btn" class="flex-1 bg-red-600 hover:bg-red-700 px-4 py-2 rounded font-semibold" disabled>⏹ 停止</button>
+        </div>
+        
+        <div class="flex gap-2 mb-4">
+            <button id="record-btn" class="flex-1 bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-semibold">⏺ 录制</button>
+            <button id="save-mp4-btn" class="flex-1 bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded font-semibold" disabled>💾 保存MP4</button>
+        </div>
+        
+        <div id="status" class="text-xs text-gray-400 mt-2">就绪</div>
+    </div>
+
+    <script type="module">
+        // ===========================
+        // 全局变量
+        // ===========================
+        let scene, camera, renderer, controls;
+        let voxelData = {};
+        let modelParts = [];
+        let partGroups = []; // 按区域/零件分组的体素
+        let animationSpeed = 1.0;
+        let isPlaying = false;
+        let animationFrameId = null;
+        
+        // 录制相关
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let isRecording = false;
+        let canvasStream = null;
+        
+        // 材质相关 - 复制主窗口的纹理生成逻辑
+        const VOXEL_SIZE = 1;
+        const GRID_SIZE = 64;
+        
+        // 草方块材质创建函数（与主窗口相同）
+        function createPixelTexture(colorData, width = 16, height = 16) {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext('2d');
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    context.fillStyle = colorData(x, y);
+                    context.fillRect(x, y, 1, 1);
+                }
+            }
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.magFilter = THREE.NearestFilter;
+            texture.minFilter = THREE.NearestFilter;
+            return texture;
+        }
+        
+        function randColor(base, variance) {
+            const c = base + Math.floor((Math.random() - 0.5) * variance);
+            return Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0');
+        }
+        
+        // 创建草方块材质
+        const grassTopTexture = createPixelTexture(() => 
+            `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}`
+        );
+        const dirtTexture = createPixelTexture(() => 
+            `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`
+        );
+        const grassSideTexture = createPixelTexture((x, y) => 
+            (y < 4) ? `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}` 
+                    : `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`
+        );
+        
+        // 方块材质映射（扩展）
+        const blockMaterials = {
+            'grass': [
+                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
+                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
+                new THREE.MeshLambertMaterial({ map: grassTopTexture }),
+                new THREE.MeshLambertMaterial({ map: dirtTexture }),
+                new THREE.MeshLambertMaterial({ map: grassSideTexture }),
+                new THREE.MeshLambertMaterial({ map: grassSideTexture })
+            ],
+            'dirt': new THREE.MeshLambertMaterial({ map: dirtTexture }),
+            'stone': new THREE.MeshLambertMaterial({ color: 0x808080 }),
+            'wood': new THREE.MeshLambertMaterial({ color: 0x8b5a2b }),
+            'cobblestone': new THREE.MeshLambertMaterial({ color: 0x808080 }),
+            'default': new THREE.MeshLambertMaterial({ color: 0xff00ff })
+        };
+        
+        // ===========================
+        // 初始化
+        // ===========================
+        function init() {
+            // 加载数据
+            const voxelDataStr = sessionStorage.getItem('renderVoxelData');
+            const modelPartsStr = sessionStorage.getItem('renderModelParts');
+            
+            if (!voxelDataStr) {
+                document.getElementById('status').textContent = '错误：未找到体素数据';
+                return;
+            }
+            
+            voxelData = JSON.parse(voxelDataStr);
+            modelParts = modelPartsStr ? JSON.parse(modelPartsStr) : [];
+            
+            // 创建场景
+            const mount = document.getElementById('mount');
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // 天空蓝
+            scene.fog = new THREE.Fog(0x87CEEB, 50, 200);
+            
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(20, 20, 20);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            mount.appendChild(renderer.domElement);
+            
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            
+            // 灯光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 10);
+            scene.add(directionalLight);
+            
+            // 添加地面（草地）
+            createGround();
+            
+            // 按Y轴分组体素（作为不同的区域/零件）
+            groupVoxelsByRegions();
+            
+            // 生成控制面板
+            generatePartControls();
+            
+            // 事件监听
+            document.getElementById('play-btn').addEventListener('click', playAnimation);
+            document.getElementById('stop-btn').addEventListener('click', stopAnimation);
+            document.getElementById('record-btn').addEventListener('click', toggleRecording);
+            document.getElementById('save-mp4-btn').addEventListener('click', saveMP4);
+            document.getElementById('speed-slider').addEventListener('input', (e) => {
+                animationSpeed = parseFloat(e.target.value);
+                document.getElementById('speed-value').textContent = animationSpeed.toFixed(1) + 'x';
+            });
+            
+            window.addEventListener('resize', onWindowResize);
+            
+            // 渲染循环
+            animate();
+            
+            document.getElementById('status').textContent = `已加载 ${Object.keys(voxelData).length} 个方块，${partGroups.length} 个区域`;
+        }
+        
+        function createGround() {
+            const groundSize = 50;
+            const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const groundMesh = new THREE.InstancedMesh(blockGeometry, blockMaterials.grass, groundSize * groundSize);
+            
+            const dummy = new THREE.Object3D();
+            let index = 0;
+            for (let x = -groundSize / 2; x < groundSize / 2; x++) {
+                for (let z = -groundSize / 2; z < groundSize / 2; z++) {
+                    dummy.position.set(x + 0.5, -0.5, z + 0.5);
+                    dummy.updateMatrix();
+                    groundMesh.setMatrixAt(index++, dummy.matrix);
+                }
+            }
+            scene.add(groundMesh);
+        }
+        
+        function groupVoxelsByRegions() {
+            // 按Y轴分组（每层作为一个区域）
+            const layers = new Map();
+            
+            Object.entries(voxelData).forEach(([coordString, props]) => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                if (!layers.has(y)) {
+                    layers.set(y, []);
+                }
+                layers.get(y).push({ x, y, z, props, coordString });
+            });
+            
+            // 转换为数组并排序
+            partGroups = Array.from(layers.entries())
+                .sort((a, b) => a[0] - b[0]) // 按Y轴从低到高排序
+                .map(([yLevel, voxels]) => ({
+                    name: `层级 ${yLevel}`,
+                    yLevel,
+                    voxels,
+                    effect: 'fade' // 默认效果
+                }));
+        }
+        
+        function generatePartControls() {
+            const partsList = document.getElementById('parts-list');
+            partsList.innerHTML = '<h3 class="text-sm font-semibold mb-2">区域/零件</h3>';
+            
+            partGroups.forEach((group, index) => {
+                const div = document.createElement('div');
+                div.className = 'part-control';
+                div.innerHTML = `
+                    <div class="text-xs font-semibold mb-1">${group.name} (${group.voxels.length}块)</div>
+                    <select class="w-full p-1 bg-gray-600 rounded text-xs" data-index="${index}">
+                        <option value="fade">淡入淡出</option>
+                        <option value="rise">升起</option>
+                        <option value="fall">下落</option>
+                        <option value="spiral">螺旋</option>
+                        <option value="explode">爆炸组装</option>
+                    </select>
+                `;
+                
+                div.querySelector('select').addEventListener('change', (e) => {
+                    partGroups[index].effect = e.target.value;
+                });
+                
+                partsList.appendChild(div);
+            });
+        }
+        
+        // ===========================
+        // 动画系统
+        // ===========================
+        function playAnimation() {
+            if (isPlaying) return;
+            
+            isPlaying = true;
+            document.getElementById('play-btn').disabled = true;
+            document.getElementById('stop-btn').disabled = false;
+            document.getElementById('status').textContent = '正在播放动画...';
+            
+            // 清除现有方块
+            scene.children.filter(obj => obj.userData.isVoxel).forEach(obj => {
+                scene.remove(obj);
+            });
+            
+            // 按顺序播放每个区域的动画
+            animateRegions(0);
+        }
+        
+        function animateRegions(regionIndex) {
+            if (!isPlaying || regionIndex >= partGroups.length) {
+                // 动画完成
+                stopAnimation();
+                return;
+            }
+            
+            const region = partGroups[regionIndex];
+            const effect = region.effect;
+            const delay = 1000 / animationSpeed; // 每个区域之间的延迟
+            
+            // 根据效果类型播放动画
+            animateRegionWithEffect(region, effect, () => {
+                // 这个区域完成后，播放下一个
+                setTimeout(() => {
+                    animateRegions(regionIndex + 1);
+                }, delay);
+            });
+        }
+        
+        function animateRegionWithEffect(region, effect, onComplete) {
+            const duration = 1000 / animationSpeed; // 动画持续时间
+            const voxels = region.voxels;
+            const meshes = [];
+            
+            // 创建所有方块
+            voxels.forEach(voxel => {
+                const geometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+                const material = getMaterialForVoxel(voxel.props);
+                const mesh = new THREE.Mesh(geometry, material);
+                
+                const halfGrid = GRID_SIZE / 2;
+                const targetX = -halfGrid + (voxel.x + 0.5) * VOXEL_SIZE;
+                const targetY = (voxel.y + 0.5) * VOXEL_SIZE;
+                const targetZ = -halfGrid + (voxel.z + 0.5) * VOXEL_SIZE;
+                
+                mesh.userData.target = { x: targetX, y: targetY, z: targetZ };
+                mesh.userData.isVoxel = true;
+                
+                // 根据效果设置初始位置
+                switch (effect) {
+                    case 'fade':
+                        mesh.position.set(targetX, targetY, targetZ);
+                        mesh.material.transparent = true;
+                        mesh.material.opacity = 0;
+                        break;
+                    case 'rise':
+                        mesh.position.set(targetX, targetY - 10, targetZ);
+                        break;
+                    case 'fall':
+                        mesh.position.set(targetX, targetY + 20, targetZ);
+                        break;
+                    case 'spiral':
+                        mesh.position.set(targetX, targetY, targetZ);
+                        mesh.scale.set(0, 0, 0);
+                        mesh.userData.angle = Math.random() * Math.PI * 2;
+                        break;
+                    case 'explode':
+                        const dist = Math.sqrt(Math.pow(voxel.x, 2) + Math.pow(voxel.z, 2)) * 2;
+                        mesh.position.set(targetX * 3, targetY, targetZ * 3);
+                        break;
+                }
+                
+                scene.add(mesh);
+                meshes.push(mesh);
+            });
+            
+            // 动画更新
+            const startTime = Date.now();
+            
+            function updateAnimation() {
+                if (!isPlaying) {
+                    onComplete();
+                    return;
+                }
+                
+                const elapsed = Date.now() - startTime;
+                const progress = Math.min(1, elapsed / duration);
+                const eased = easeOutCubic(progress);
+                
+                meshes.forEach(mesh => {
+                    const target = mesh.userData.target;
+                    
+                    switch (effect) {
+                        case 'fade':
+                            mesh.material.opacity = eased;
+                            break;
+                        case 'rise':
+                            mesh.position.y = (target.y - 10) * (1 - eased) + target.y * eased;
+                            break;
+                        case 'fall':
+                            mesh.position.y = (target.y + 20) * (1 - eased) + target.y * eased;
+                            break;
+                        case 'spiral':
+                            const scale = eased;
+                            mesh.scale.set(scale, scale, scale);
+                            mesh.rotation.y = mesh.userData.angle * (1 - eased);
+                            break;
+                        case 'explode':
+                            mesh.position.x = mesh.position.x * (1 - eased) + target.x * eased;
+                            mesh.position.y = mesh.position.y * (1 - eased) + target.y * eased;
+                            mesh.position.z = mesh.position.z * (1 - eased) + target.z * eased;
+                            break;
+                    }
+                });
+                
+                if (progress < 1) {
+                    requestAnimationFrame(updateAnimation);
+                } else {
+                    // 确保所有方块都在正确位置
+                    meshes.forEach(mesh => {
+                        const target = mesh.userData.target;
+                        mesh.position.set(target.x, target.y, target.z);
+                        mesh.scale.set(1, 1, 1);
+                        mesh.rotation.set(0, 0, 0);
+                        if (mesh.material.transparent) {
+                            mesh.material.opacity = 1;
+                        }
+                    });
+                    onComplete();
+                }
+            }
+            
+            updateAnimation();
+        }
+        
+        function stopAnimation() {
+            isPlaying = false;
+            document.getElementById('play-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
+            document.getElementById('status').textContent = '动画已停止';
+        }
+        
+        function easeOutCubic(t) {
+            return 1 - Math.pow(1 - t, 3);
+        }
+        
+        function getMaterialForVoxel(props) {
+            // 简单的材质映射，根据blockId返回材质
+            // 这里可以扩展以支持更多材质
+            const blockId = props.blockId || 0;
+            const metaData = props.metaData || 0;
+            
+            // 根据blockId判断材质类型
+            if (blockId === 2 || blockId === 0) { // 草方块
+                return blockMaterials.grass;
+            } else if (blockId === 3) { // 泥土
+                return blockMaterials.dirt;
+            } else if (blockId === 1) { // 石头
+                return blockMaterials.stone;
+            } else if (blockId === 5 || blockId === 17) { // 木头
+                return blockMaterials.wood;
+            } else if (blockId === 4) { // 鹅卵石
+                return blockMaterials.cobblestone;
+            }
+            
+            return blockMaterials.default;
+        }
+        
+        // ===========================
+        // 录制功能
+        // ===========================
+        function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+        
+        function startRecording() {
+            try {
+                recordedChunks = [];
+                
+                // 创建canvas stream
+                canvasStream = renderer.domElement.captureStream(30); // 30 fps
+                
+                // 创建MediaRecorder
+                const options = { mimeType: 'video/webm;codecs=vp9' };
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm;codecs=vp8';
+                }
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm';
+                }
+                
+                mediaRecorder = new MediaRecorder(canvasStream, options);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    document.getElementById('save-mp4-btn').disabled = false;
+                    document.getElementById('status').textContent = '录制完成，可以保存MP4';
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                
+                document.getElementById('record-btn').textContent = '⏹ 停止录制';
+                document.getElementById('record-btn').classList.add('recording');
+                document.getElementById('status').textContent = '正在录制...';
+                
+                // 自动开始播放动画
+                if (!isPlaying) {
+                    playAnimation();
+                }
+            } catch (error) {
+                console.error('录制启动失败:', error);
+                document.getElementById('status').textContent = '录制失败: ' + error.message;
+            }
+        }
+        
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                
+                document.getElementById('record-btn').textContent = '⏺ 录制';
+                document.getElementById('record-btn').classList.remove('recording');
+            }
+        }
+        
+        function saveMP4() {
+            if (recordedChunks.length === 0) {
+                alert('没有可保存的录制数据');
+                return;
+            }
+            
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `building_animation_${Date.now()}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            document.getElementById('status').textContent = '视频已保存';
+            document.getElementById('save-mp4-btn').disabled = true;
+            recordedChunks = [];
+        }
+        
+        // ===========================
+        // 渲染循环
+        // ===========================
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // 启动应用
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+"""
+
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -259,6 +821,7 @@ HTML_CONTENT = """
             <div class="mt-3 pt-3 border-t border-gray-700">
                 <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
                 <button id="play-animation-btn" class="bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>播放动画</button>
+                <button id="open-render-window-btn" class="mt-1.5 bg-pink-600 hover:bg-pink-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full" disabled>🎬 渲染窗口</button>
                 <div class="mt-2">
                     <label for="animation-speed-slider" class="block text-xs font-medium text-gray-400">速度</label>
                     <input type="range" id="animation-speed-slider" min="1" max="100" value="50" class="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer">
@@ -2114,6 +2677,7 @@ ${historyString}
             document.getElementById('import-save-input').addEventListener('change', handleImportSave);
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
             document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
+            document.getElementById('open-render-window-btn').addEventListener('click', openRenderWindow);
         });
 
         // --- 存档功能函数 ---
@@ -2252,6 +2816,23 @@ ${historyString}
                 console.error('Import from URL error:', error);
                 addAiChatMessage('system', `❌ 从URL导入存档失败: ${error.message}`);
             }
+        }
+
+        function openRenderWindow() {
+            if (currentVoxelCoords.size === 0) {
+                addAiChatMessage('system', '请先加载模型！');
+                return;
+            }
+            
+            // 准备体素数据
+            const voxelData = getCurrentVoxelData();
+            
+            // 将数据保存到 sessionStorage 以便渲染窗口访问
+            sessionStorage.setItem('renderVoxelData', JSON.stringify(voxelData));
+            sessionStorage.setItem('renderModelParts', JSON.stringify(modelParts));
+            
+            // 打开新窗口
+            window.open('/render-window', '_blank', 'width=1280,height=720');
         }
 
         async function playFallingAnimation() {
@@ -2434,6 +3015,11 @@ def index():
         is_key_pre_validated=API_KEY_VALIDATED,
         initial_save_data=INITIAL_SAVE_DATA
     )
+
+@app.route('/render-window')
+def render_window():
+    """渲染窗口页面"""
+    return render_template_string(RENDER_WINDOW_HTML)
 
 @app.route('/api/files')
 def get_initial_files():
