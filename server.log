@@ -1,0 +1,18 @@
+2025-10-26 10:26:27,828 - [SERVER] - INFO - The key.txt file was not found. The application will require manual key entry in the web page.
+
+======================================================================
+🚀 3D AI Assistant Viewer has started
+Server is running on http://127.0.0.1:5000
+
+----------------------------------------------------------------------
+Instructions:
+1. Model Loading: Place your .glb/.gltf model files in the 'input/' folder,
+   or use the `--input_model <URL or path>` command-line argument to load directly.
+2. Place your .png/.jpg reference images in the 'input/' folder.
+3. Place your .zip texture packs in the same folder as this script.
+4. The page has been automatically opened in your browser.
+5. All file scanning and server logs will be displayed in this terminal window.
+======================================================================
+
+ * Serving Flask app 'server'
+ * Debug mode: off
