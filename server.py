@@ -941,7 +941,129 @@ HTML_CONTENT = """
         }
 
         function playFallingAnimation() {
-            // This function is now deprecated and will be removed.
+            if (isAnimationPlaying || currentVoxelCoords.size === 0) return;
+
+            isAnimationPlaying = true;
+
+            const animationSpeed = 1.0;
+            const voxels = [];
+            const halfGrid = GRID_SIZE / 2;
+
+            currentVoxelCoords.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const voxelProps = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                const targetPosition = new THREE.Vector3(
+                    -halfGrid + (x + 0.5) * VOXEL_SIZE,
+                    (y + 0.5) * VOXEL_SIZE,
+                    -halfGrid + (z + 0.5) * VOXEL_SIZE
+                );
+                voxels.push({ coordString, voxelProps, targetPosition });
+            });
+
+            voxels.sort((a, b) => a.targetPosition.y - b.targetPosition.y);
+
+            voxelContainerGroup.visible = false;
+
+            const animationGroup = new THREE.Group();
+            scene.add(animationGroup);
+            const baseVoxelGeometry = new THREE.BoxGeometry(VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98, VOXEL_SIZE * 0.98);
+            const materialCache = new Map();
+
+            voxels.forEach(voxel => {
+                const textureKey = getTextureKeyForVoxel(voxel.voxelProps.blockId, voxel.voxelProps.metaData, DEFAULT_BLOCK_ID_LIST);
+                let material;
+                if (materialCache.has(textureKey)) {
+                    material = materialCache.get(textureKey);
+                } else {
+                    const texture = loadedTextures.get(textureKey);
+                    if (texture) {
+                        material = new THREE.MeshStandardMaterial({ map: texture, metalness: 0.1, roughness: 0.8 });
+                    } else {
+                        const color = TEXTURE_KEY_TO_COLOR_MAP[textureKey] || TEXTURE_KEY_TO_COLOR_MAP['unknown'];
+                        material = new THREE.MeshLambertMaterial({ color });
+                    }
+                    materialCache.set(textureKey, material);
+                }
+
+                const mesh = new THREE.Mesh(baseVoxelGeometry, material);
+                mesh.castShadow = true;
+                mesh.position.copy(voxel.targetPosition);
+                mesh.position.y += GRID_SIZE * 1.5;
+                mesh.position.x += (Math.random() - 0.5) * GRID_SIZE * 0.5;
+                mesh.position.z += (Math.random() - 0.5) * GRID_SIZE * 0.5;
+
+                voxel.mesh = mesh;
+                voxel.startTime = -1;
+                animationGroup.add(mesh);
+            });
+
+            let startTime = null;
+            const fallDuration = 1000 / animationSpeed;
+            const staggerDelay = 50 / animationSpeed;
+
+            function animationLoop(timestamp) {
+                if (startTime === null) startTime = timestamp;
+                const elapsedTime = timestamp - startTime;
+
+                let allFinished = true;
+                voxels.forEach((voxel, index) => {
+                    if (voxel.startTime < 0) {
+                        if (elapsedTime > index * staggerDelay) {
+                            voxel.startTime = timestamp;
+                        } else {
+                             allFinished = false;
+                        }
+                    }
+
+                    if (voxel.startTime >= 0) {
+                        const voxelElapsedTime = timestamp - voxel.startTime;
+                        const progress = Math.min(voxelElapsedTime / fallDuration, 1);
+                        const t = progress;
+                        const c = 1.0;
+                        let newY;
+                        if (t < (1 / 2.75)) {
+                            newY = c * (7.5625 * t * t);
+                        } else if (t < (2 / 2.75)) {
+                            newY = c * (7.5625 * (t -= (1.5 / 2.75)) * t + 0.75);
+                        } else if (t < (2.5 / 2.75)) {
+                            newY = c * (7.5625 * (t -= (2.25 / 2.75)) * t + 0.9375);
+                        } else {
+                            newY = c * (7.5625 * (t -= (2.625 / 2.75)) * t + 0.984375);
+                        }
+
+                        const startY = voxel.targetPosition.y + GRID_SIZE * 1.5;
+                        const endY = voxel.targetPosition.y;
+                        voxel.mesh.position.y = startY - (startY - endY) * newY;
+                        const startX = voxel.mesh.userData.startX || voxel.mesh.position.x;
+                        const startZ = voxel.mesh.userData.startZ || voxel.mesh.position.z;
+                        if (!voxel.mesh.userData.startX) {
+                            voxel.mesh.userData.startX = startX;
+                            voxel.mesh.userData.startZ = startZ;
+                        }
+                        voxel.mesh.position.x = THREE.MathUtils.lerp(startX, voxel.targetPosition.x, progress);
+                        voxel.mesh.position.z = THREE.MathUtils.lerp(startZ, voxel.targetPosition.z, progress);
+
+                        if (progress < 1) {
+                            allFinished = false;
+                        } else {
+                            voxel.mesh.position.copy(voxel.targetPosition);
+                        }
+                    }
+                });
+
+                if (allFinished) {
+                    scene.remove(animationGroup);
+                    baseVoxelGeometry.dispose();
+                    materialCache.forEach(material => material.dispose());
+                    voxelContainerGroup.visible = true;
+                    isAnimationPlaying = false;
+                    console.log("Animation finished.");
+                } else {
+                    requestAnimationFrame(animationLoop);
+                }
+            }
+
+            requestAnimationFrame(animationLoop);
         }
 
         // ====================================================================
@@ -2451,9 +2573,11 @@ ${historyString}
                     initializeApp(); // Centralized initialization
                 } else {
                     errorMsg.textContent = result.message || '验证失败，请重试。';
+                    localStorage.removeItem('geminiApiKey'); // On failure, clear the bad key
                 }
             } catch (error) {
                 console.error('Validation fetch error:', error);
+                localStorage.removeItem('geminiApiKey'); // Also clear on network errors
                 errorMsg.textContent = '无法连接到服务器进行验证。';
             } finally {
                 validateBtn.disabled = false;
@@ -2592,15 +2716,12 @@ ${historyString}
                 particleDensityLabel.textContent = `${particleDensity}%`;
             });
             startBuildBtn.addEventListener('click', () => {
+                 const currentEffect = effectSelector.value;
+                 const currentMagicTheme = magicSelector.value;
+                 const particleDensity = particleSlider.value;
                  addAiChatMessage('system', `开始生成! 动画: ${currentEffect}, 主题: ${currentMagicTheme}, 密度: ${particleDensity}%`);
                  animateBuild();
             });
-
-            // Expose functions and variables for Playwright verification
-            window.initializeApp = initializeApp;
-            window.displayVoxels = displayVoxels;
-            window.currentVoxelCoords = currentVoxelCoords;
-            window.voxelProperties = voxelProperties;
         });
 
         // --- 存档功能函数 ---
