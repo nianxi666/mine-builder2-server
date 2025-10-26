@@ -249,10 +249,37 @@ HTML_CONTENT = """
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
-                <h3 class="text-xs font-semibold mb-1 text-gray-300">动画</h3>
-                <button id="play-animation-btn" class="bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-3 rounded-md text-xs w-full mb-1.5" disabled>播放掉落动画</button>
-                <label for="animation-speed-slider" class="block text-xs font-semibold mb-1.5 text-gray-300">速度: <span id="animation-speed-value">1.0</span>x</label>
-                <input type="range" id="animation-speed-slider" min="0.1" max="5" step="0.1" value="1" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer" disabled>
+                <h3 class="text-xs font-semibold mb-1 text-gray-300">建筑动画</h3>
+                <label for="effectSelector" class="block text-xs font-medium text-gray-300 mb-1">动画效果:</label>
+                <select id="effectSelector" class="w-full bg-gray-700 border border-gray-600 text-white py-1 px-2 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-400" disabled>
+                    <option value="magic-gradient">渐变 (Gradient)</option>
+                    <option value="vortex">旋涡 (Vortex)</option>
+                    <option value="ripple">波纹 (Ripple)</option>
+                    <option value="rain-down">天降 (Rain Down)</option>
+                    <option value="ground-up">从地升起 (Ground Up)</option>
+                    <option value="layer-scan">逐层扫描 (Layer Scan)</option>
+                    <option value="assemble">组装 (Assemble)</option>
+                    <option value="simple">闪现 (Simple)</option>
+                </select>
+
+                <label for="magicSelector" class="block text-xs font-medium text-gray-300 mb-1 mt-2">魔法主题:</label>
+                <select id="magicSelector" class="w-full bg-gray-700 border border-gray-600 text-white py-1 px-2 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-green-400" disabled>
+                    <option value="rune-energy" selected>符文能量 (绿色)</option>
+                    <option value="fire">烈焰 (红色/橙色)</option>
+                    <option value="ice">寒冰 (蓝色/白色)</option>
+                    <option value="shadow">暗影 (紫色)</option>
+                    <option value="none">无 (None)</option>
+                </select>
+
+                <div class="flex justify-between items-center mt-2">
+                    <label for="particleSlider" class="block text-xs font-medium text-gray-300">粒子密度:</label>
+                    <span id="particleDensityLabel" class="text-xs text-gray-400">33%</span>
+                </div>
+                <input type="range" id="particleSlider" min="0" max="100" value="33" class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer mt-1" disabled>
+
+                <button id="start-build-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded-md transition-all duration-300 shadow-lg mt-3 text-xs focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-opacity-75" disabled>
+                    开始生成
+                </button>
             </div>
 
             <div class="mt-3 pt-3 border-t border-gray-700">
@@ -382,7 +409,13 @@ HTML_CONTENT = """
         let agentAbortController = null;
         let agentCurrentPartIndex = 0;
         let agentOverallAnalysis = "";
-        let isAnimationPlaying = false;
+
+        // --- Animation & Particles State ---
+        let particleSystem;
+        const particles = [];
+        let isBuilding = false;
+        const MAX_PARTICLES_PER_BLOCK = 30;
+
 
         // ====================================================================
         // NEW: Automated Loading and Data Processing
@@ -580,7 +613,8 @@ HTML_CONTENT = """
             const mount = document.getElementById('mount');
             if (!mount) return;
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1f2937);
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 20, 150);
             camera = new THREE.PerspectiveCamera(75, mount.clientWidth / mount.clientHeight, 0.1, 1000);
             camera.position.set(GRID_SIZE * 0.8, GRID_SIZE * 0.8, GRID_SIZE * 0.8);
             renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -594,36 +628,66 @@ HTML_CONTENT = """
             controls = new THREE.OrbitControls(camera, renderer.domElement);
             controls.enableDamping = true;
             controls.target.set(0, GRID_SIZE / 2, 0);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxPolarAngle = Math.PI / 2 - 0.05;
+            controls.minDistance = 2;
+            controls.maxDistance = 100;
             controls.update();
 
-            scene.add(new THREE.AmbientLight(0xffffff, 0.8)); // Reduce ambient light
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 1.0);
-            directionalLight.position.set(GRID_SIZE, GRID_SIZE * 1.5, GRID_SIZE * 0.5);
-            // --- Enable Shadows on Light ---
+            scene.add(new THREE.AmbientLight(0xcccccc, 0.8));
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+            directionalLight.position.set(20, 30, 10);
             directionalLight.castShadow = true;
-            directionalLight.shadow.mapSize.width = 2048;
-            directionalLight.shadow.mapSize.height = 2048;
-            const d = GRID_SIZE * 1.5;
-            directionalLight.shadow.camera.left = -d;
-            directionalLight.shadow.camera.right = d;
-            directionalLight.shadow.camera.top = d;
-            directionalLight.shadow.camera.bottom = -d;
-            directionalLight.shadow.camera.far = GRID_SIZE * 5;
-            directionalLight.shadow.bias = -0.0001;
             scene.add(directionalLight);
 
-            const gridHelper = new THREE.GridHelper(GRID_SIZE, VOXEL_RESOLUTION, 0x555555, 0x333333);
-            scene.add(gridHelper);
+            // --- 平坦世界地面 ---
+            function createPixelTexture(colorData, width = 16, height = 16) {
+                const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+                const context = canvas.getContext('2d');
+                for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { context.fillStyle = colorData(x, y); context.fillRect(x, y, 1, 1); }
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.magFilter = THREE.NearestFilter; texture.minFilter = THREE.NearestFilter;
+                return texture;
+            }
+            function randColor(base, variance) { const c = base + Math.floor((Math.random() - 0.5) * variance); return Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0'); }
+            const grassTopTexture = createPixelTexture(() => `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}`);
+            const dirtTexture = createPixelTexture(() => `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`);
+            const grassSideTexture = createPixelTexture((x, y) => (y < 4) ? `#${randColor(80, 20)}${randColor(150, 30)}${randColor(60, 20)}` : `#${randColor(130, 20)}${randColor(90, 15)}${randColor(70, 10)}`);
+            const groundSize = 150;
+            const groundBlockGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const groundBlockMaterials = [ new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassTopTexture }),  new THREE.MeshLambertMaterial({ map: dirtTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }), new THREE.MeshLambertMaterial({ map: grassSideTexture }) ];
+            const groundMesh = new THREE.InstancedMesh(groundBlockGeometry, groundBlockMaterials, groundSize * groundSize);
+            const dummy = new THREE.Object3D();
+            let index = 0;
+            for (let x = -groundSize / 2; x < groundSize / 2; x++) {
+                for (let z = -groundSize / 2; z < groundSize / 2; z++) {
+                    dummy.position.set(x + 0.5, -0.5, z + 0.5);
+                    dummy.updateMatrix();
+                    groundMesh.setMatrixAt(index++, dummy.matrix);
+                }
+            }
+            scene.add(groundMesh);
 
-            // --- Add Ground Plane to Receive Shadows ---
-            const groundPlane = new THREE.Mesh(
-                new THREE.PlaneGeometry(GRID_SIZE * 2, GRID_SIZE * 2),
-                new THREE.ShadowMaterial({ opacity: 0.3 })
-            );
-            groundPlane.rotation.x = -Math.PI / 2;
-            groundPlane.position.y = -0.01;
-            groundPlane.receiveShadow = true;
-            scene.add(groundPlane);
+            const cloudGroup = new THREE.Group();
+            const cloudBlockGeo = new THREE.BoxGeometry(1, 1, 1);
+            const cloudMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            for (let i = 0; i < 25; i++) {
+                const cloud = new THREE.Group();
+                for (let j = 0; j < (Math.floor(Math.random() * 6) + 4); j++) {
+                    const block = new THREE.Mesh(cloudBlockGeo, cloudMaterial);
+                    block.position.set((Math.random() - 0.5) * 5, (Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 3);
+                    block.scale.set(Math.random() * 0.5 + 1, Math.random() * 0.5 + 1, Math.random() * 0.5 + 1);
+                    cloud.add(block);
+                }
+                cloud.position.set((Math.random() - 0.5) * 150, Math.random() * 10 + 25, (Math.random() - 0.5) * 150);
+                cloudGroup.add(cloud);
+            }
+            scene.add(cloudGroup);
+
+            const blockGroup = new THREE.Group(); // Group for animated blocks
+            blockGroup.name = "blockGroup";
+            scene.add(blockGroup);
 
             voxelContainerGroup = new THREE.Group();
             scene.add(voxelContainerGroup);
@@ -634,6 +698,22 @@ HTML_CONTENT = """
             selectionHighlightMesh.count = 0;
             scene.add(selectionHighlightMesh);
             raycaster = new THREE.Raycaster();
+
+            // --- 初始化粒子系统 ---
+            const particleGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(5000 * 3);
+            const colors = new Float32Array(5000 * 3);
+            const sizes = new Float32Array(5000);
+            for (let i = 0; i < 5000; i++) { sizes[i] = 1; }
+            particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+            const particleMaterial = new THREE.PointsMaterial({ size: 0.1, sizeAttenuation: true, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+            particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+            particleSystem.visible = false;
+            scene.add(particleSystem);
+
+
             window.addEventListener('resize', onWindowResize);
             mount.addEventListener('click', onCanvasClick);
             animate();
@@ -641,6 +721,11 @@ HTML_CONTENT = """
 
         function animate() {
             requestAnimationFrame(animate);
+            cloudGroup.children.forEach(cloud => {
+                cloud.position.x += 0.01;
+                if (cloud.position.x > 100) { cloud.position.x = -100; cloud.position.z = (Math.random() - 0.5) * 150; }
+            });
+            if (particleSystem.visible) updateParticles();
             controls.update();
             renderer.render(scene, camera);
         }
@@ -665,13 +750,19 @@ HTML_CONTENT = """
                 else child.material.dispose();
             }
             const exportBtn = document.getElementById('export-txt-btn');
-            const animationBtn = document.getElementById('play-animation-btn');
-            const animationSlider = document.getElementById('animation-speed-slider');
+            const effectSelector = document.getElementById('effectSelector');
+            const magicSelector = document.getElementById('magicSelector');
+            const particleSlider = document.getElementById('particleSlider');
+            const startBuildBtn = document.getElementById('start-build-btn');
+
 
             const hasVoxels = currentVoxelCoords.size > 0;
             if(exportBtn) exportBtn.disabled = !hasVoxels;
-            if(animationBtn) animationBtn.disabled = !hasVoxels;
-            if(animationSlider) animationSlider.disabled = !hasVoxels;
+            if(effectSelector) effectSelector.disabled = !hasVoxels;
+            if(magicSelector) magicSelector.disabled = !hasVoxels;
+            if(particleSlider) particleSlider.disabled = !hasVoxels;
+            if(startBuildBtn) startBuildBtn.disabled = !hasVoxels;
+
 
             if (!hasVoxels) {
                 updateSelectionUI();
@@ -850,10 +941,413 @@ HTML_CONTENT = """
         }
 
         function playFallingAnimation() {
-            if (isAnimationPlaying || currentVoxelCoords.size === 0) return;
+            // This function is now deprecated and will be removed.
+        }
 
-            isAnimationPlaying = true;
-            document.getElementById('play-animation-btn').disabled = true;
+        // ====================================================================
+        // NEW: Generative Building Animations & Particle System
+        // ====================================================================
+
+        function animateBuild() {
+            if (isBuilding || currentVoxelCoords.size === 0) return;
+            isBuilding = true;
+
+            // Hide the original voxel group
+            voxelContainerGroup.visible = false;
+            // Clear any previous blocks from animation (if any)
+            while (blockGroup.children.length > 0) {
+                 const child = blockGroup.children[0];
+                 blockGroup.remove(child);
+                 if (child.geometry) child.geometry.dispose();
+                 if (child.material) {
+                     if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                     else child.material.dispose();
+                 }
+            }
+
+            // V6: 根据魔法主题和密度决定粒子系统是否可见
+            const magicSelector = document.getElementById('magicSelector');
+            const particleSlider = document.getElementById('particleSlider');
+            const currentMagicTheme = magicSelector ? magicSelector.value : 'none';
+            const particleDensity = particleSlider ? parseInt(particleSlider.value, 10) : 0;
+            particleSystem.visible = (currentMagicTheme !== 'none' && particleDensity > 0);
+
+
+            const effectSelector = document.getElementById('effectSelector');
+            const currentEffect = effectSelector ? effectSelector.value : 'simple';
+
+            // Adapt schematic data from current model
+            const schematicData = [];
+            currentVoxelCoords.forEach(coordString => {
+                const [x, y, z] = coordString.split(',').map(Number);
+                const halfGrid = GRID_SIZE / 2;
+                const voxelProps = voxelProperties.get(coordString) || DEFAULT_VOXEL_PROPERTIES;
+                const textureKey = getTextureKeyForVoxel(voxelProps.blockId, voxelProps.metaData, DEFAULT_BLOCK_ID_LIST);
+
+                schematicData.push({
+                    x: -halfGrid + (x + 0.5) * VOXEL_SIZE,
+                    y: (y + 0.5) * VOXEL_SIZE,
+                    z: -halfGrid + (z + 0.5) * VOXEL_SIZE,
+                    textureKey: textureKey
+                });
+            });
+
+
+            switch (currentEffect) {
+                case 'layer-scan':
+                    startBuild_LayerScan(schematicData, currentMagicTheme);
+                    break;
+                case 'ripple':
+                    startBuild_Ripple(schematicData, currentMagicTheme);
+                    break;
+                default:
+                    startBuildSequence(getAnimationFunction(currentEffect), schematicData, 30, currentMagicTheme);
+                    break;
+            }
+        }
+
+        function getAnimationFunction(effectName) {
+            switch (effectName) {
+                case 'magic-gradient': return animateBlock_MagicGradient;
+                case 'vortex': return animateBlock_Vortex;
+                case 'rain-down': return animateBlock_RainDown;
+                case 'ground-up': return animateBlock_GroundUp;
+                case 'assemble': return animateBlock_Assemble;
+                case 'simple':
+                default: return animateBlock_Simple;
+            }
+        }
+
+        function startBuildSequence(animationFunction, schematicData, delay, magicTheme) {
+            const shuffledData = [...schematicData].sort(() => Math.random() - 0.5);
+            let blockIndex = 0;
+            function placeNextBlock() {
+                if (blockIndex >= shuffledData.length) {
+                    isBuilding = false;
+                    voxelContainerGroup.visible = true; // Show original model when done
+                    return;
+                }
+                const blockData = shuffledData[blockIndex];
+                const block = animationFunction(blockData);
+                applyMagicTheme(block, blockData, magicTheme);
+                blockIndex++;
+                setTimeout(placeNextBlock, delay);
+            }
+            placeNextBlock();
+        }
+
+        // --- Magic Theme Application ---
+        function applyMagicTheme(block, blockData, magicTheme) {
+            const particleSlider = document.getElementById('particleSlider');
+            const particleDensity = particleSlider ? parseInt(particleSlider.value, 10) : 0;
+
+            if (magicTheme !== 'none' && particleDensity > 0) {
+                 emitParticles(blockData, magicTheme, particleDensity);
+                 animateGlow(block, magicTheme);
+            }
+        }
+
+        function animateGlow(block, theme) {
+            if (!block.material.clone) return;
+            block.material = block.material.clone();
+
+            let emissiveColor;
+            switch (theme) {
+                case 'fire': emissiveColor = 0xff8800; break;
+                case 'ice': emissiveColor = 0x88ccff; break;
+                case 'shadow': emissiveColor = 0xcc88ff; break;
+                case 'rune-energy':
+                default: emissiveColor = 0x88ff88; break;
+            }
+            block.material.emissive = new THREE.Color(emissiveColor);
+            block.material.emissiveIntensity = 0;
+
+            let progress = 0, duration = 800, startTime = Date.now();
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                if (progress < 0.5) { block.material.emissiveIntensity = progress * 2; }
+                else { block.material.emissiveIntensity = (1 - progress) * 2; }
+                if (progress < 1) { requestAnimationFrame(animate); }
+                else { block.material.emissiveIntensity = 0; }
+            }
+            animate();
+        }
+
+
+        // --- 8 Animation Effects ---
+
+        function animateBlock_MagicGradient(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture, transparent: true, opacity: 0.01 }) : new THREE.MeshLambertMaterial({ color: 0x999999, transparent: true, opacity: 0.01 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            block.position.set(blockData.x, blockData.y, blockData.z);
+            block.scale.set(0.8, 0.8, 0.8);
+            blockGroup.add(block);
+
+            let progress = 0, duration = 1000, startTime = Date.now();
+            const startScale = block.scale.clone();
+            const targetScale = new THREE.Vector3(1, 1, 1);
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = Math.pow(progress, 2);
+                block.material.opacity = 0.01 + 0.99 * easedProgress;
+                block.scale.lerpVectors(startScale, targetScale, easedProgress);
+                if (progress < 1) { requestAnimationFrame(animate); }
+                else { block.material.opacity = 1; block.scale.set(1, 1, 1); }
+            }
+            animate();
+            return block;
+        }
+
+        function animateBlock_Vortex(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: 0x999999 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            blockGroup.add(block);
+
+            let progress = 0, duration = 800, startTime = Date.now();
+            const startRadius = 10.0, startAngle = Math.random() * Math.PI * 2;
+            const totalRotations = 3 * Math.PI * 2, startY = blockData.y + 5 + Math.random() * 3;
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                const currentRadius = startRadius * (1 - easedProgress);
+                const currentAngle = startAngle + totalRotations * easedProgress;
+                const currentY = startY + (blockData.y - startY) * easedProgress;
+                block.position.x = blockData.x + currentRadius * Math.cos(currentAngle);
+                block.position.z = blockData.z + currentRadius * Math.sin(currentAngle);
+                block.position.y = currentY;
+                block.rotation.y = currentAngle;
+                if (progress < 1) { requestAnimationFrame(animate); }
+                else { block.rotation.set(0,0,0); block.position.set(blockData.x, blockData.y, blockData.z); }
+            }
+            animate();
+            return block;
+        }
+
+        function animateBlock_RainDown(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: 0x999999 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            block.position.set(blockData.x, blockData.y + 15, blockData.z);
+            block.scale.set(1.1, 0.8, 1.1);
+            blockGroup.add(block);
+            let progress = 0, duration = 500, startTime = Date.now();
+            const startY = block.position.y, targetY = blockData.y;
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                block.position.y = startY + (targetY - startY) * easedProgress;
+                if (progress < 1) { requestAnimationFrame(animate); }
+                else { animateBounce(block); }
+            }
+            function animateBounce(b) {
+                let bounceProgress = 0, bounceDuration = 200, bounceStart = Date.now();
+                function bounce() {
+                    const elapsed = Date.now() - bounceStart;
+                    bounceProgress = Math.min(1, elapsed / bounceDuration);
+                    const scaleY = 0.8 + 0.2 * Math.abs(Math.sin(bounceProgress * Math.PI));
+                    const scaleXZ = 1.1 - 0.1 * Math.abs(Math.sin(bounceProgress * Math.PI));
+                    b.scale.set(scaleXZ, scaleY, scaleXZ);
+                    if (bounceProgress < 1) { requestAnimationFrame(bounce); }
+                    else { b.scale.set(1, 1, 1); }
+                }
+                bounce();
+            }
+            animate();
+            return block;
+        }
+
+        function animateBlock_GroundUp(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: 0x999999 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            block.position.set(blockData.x, -5, blockData.z);
+            blockGroup.add(block);
+            let progress = 0, duration = 600, startTime = Date.now();
+            const startY = block.position.y, targetY = blockData.y;
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                block.position.y = startY + (targetY - startY) * easedProgress;
+                if (progress < 1) { requestAnimationFrame(animate); }
+            }
+            animate();
+            return block;
+        }
+
+        function animateBlock_Assemble(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: 0x999999 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            const startX = blockData.x > 0 ? blockData.x + 15 : blockData.x - 15;
+            block.position.set(startX, blockData.y, blockData.z);
+            blockGroup.add(block);
+            let progress = 0, duration = 400, startTime = Date.now();
+            const targetX = blockData.x;
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                const easedProgress = progress * progress;
+                block.position.x = startX + (targetX - startX) * easedProgress;
+                if (progress < 1) { requestAnimationFrame(animate); }
+            }
+            animate();
+            return block;
+        }
+
+        function animateBlock_Simple(blockData) {
+            const blockGeometry = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+            const texture = loadedTextures.get(blockData.textureKey);
+            const material = texture ? new THREE.MeshLambertMaterial({ map: texture }) : new THREE.MeshLambertMaterial({ color: 0x999999 });
+            const block = new THREE.Mesh(blockGeometry, material);
+            block.position.set(blockData.x, blockData.y, blockData.z);
+            block.scale.set(0, 0, 0);
+            blockGroup.add(block);
+            let progress = 0, duration = 100, startTime = Date.now();
+            function animate() {
+                const elapsed = Date.now() - startTime;
+                progress = Math.min(1, elapsed / duration);
+                block.scale.set(progress, progress, progress);
+                if (progress < 1) { requestAnimationFrame(animate); }
+            }
+            animate();
+            return block;
+        }
+
+
+        // --- Special Sequence Builders ---
+
+        function startBuild_LayerScan(schematicData, magicTheme) {
+            const sortedData = [...schematicData].sort((a, b) => a.y - b.y);
+            const layers = new Map();
+            sortedData.forEach(blockData => { if (!layers.has(blockData.y)) layers.set(blockData.y, []); layers.get(blockData.y).push(blockData); });
+            const layerKeys = Array.from(layers.keys());
+            let layerIndex = 0;
+            function buildNextLayer() {
+                if (layerIndex >= layerKeys.length) {
+                    isBuilding = false;
+                    voxelContainerGroup.visible = true;
+                    return;
+                }
+                const currentLayerY = layerKeys[layerIndex];
+                const blocksInLayer = layers.get(currentLayerY);
+                blocksInLayer.forEach(blockData => {
+                    const block = animateBlock_Simple(blockData);
+                    applyMagicTheme(block, blockData, magicTheme);
+                });
+                layerIndex++;
+                setTimeout(buildNextLayer, 300);
+            }
+            buildNextLayer();
+        }
+
+        function startBuild_Ripple(schematicData, magicTheme) {
+            const distanceData = schematicData.map(blockData => ({ ...blockData, dist: Math.sqrt(blockData.x * blockData.x + blockData.z * blockData.z) }));
+            distanceData.sort((a, b) => a.dist - b.dist);
+            const ripples = new Map();
+            distanceData.forEach(blockData => { const rippleIndex = Math.floor(blockData.dist / VOXEL_SIZE); if (!ripples.has(rippleIndex)) ripples.set(rippleIndex, []); ripples.get(rippleIndex).push(blockData); });
+            const rippleKeys = Array.from(ripples.keys()).sort((a, b) => a - b);
+            let rippleIndex = 0;
+            function buildNextRipple() {
+                if (rippleIndex >= rippleKeys.length) {
+                     isBuilding = false;
+                     voxelContainerGroup.visible = true;
+                     return;
+                }
+                const currentRippleKey = rippleKeys[rippleIndex];
+                const blocksInRipple = ripples.get(currentRippleKey);
+                blocksInRipple.forEach(blockData => {
+                    const block = animateBlock_GroundUp(blockData);
+                    applyMagicTheme(block, blockData, magicTheme);
+                });
+                rippleIndex++;
+                setTimeout(buildNextRipple, 100);
+            }
+            buildNextRipple();
+        }
+
+        // --- Particle System Logic ---
+        function updateParticles() {
+            const positions = particleSystem.geometry.attributes.position.array, colors = particleSystem.geometry.attributes.color.array, sizes = particleSystem.geometry.attributes.size.array;
+            for (let i = 0; i < particles.length; i++) {
+                const p = particles[i]; if (p.life <= 0) continue;
+                p.velocity.y -= p.gravity;
+                p.position.add(p.velocity);
+                p.life -= 0.01; p.opacity = p.life / p.maxLife;
+                if (p.life <= 0) { positions[i * 3 + 1] = -1000; } // Move off-screen
+                else {
+                    positions[i * 3] = p.position.x; positions[i * 3 + 1] = p.position.y; positions[i * 3 + 2] = p.position.z;
+                    colors[i * 3] = p.color.r * p.opacity; colors[i * 3 + 1] = p.color.g * p.opacity; colors[i * 3 + 2] = p.color.b * p.opacity;
+                    sizes[i] = p.size * p.opacity;
+                }
+            }
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+            particleSystem.geometry.attributes.size.needsUpdate = true;
+        }
+
+        function emitParticles(blockData, theme, particleDensity) {
+            const numToEmit = Math.floor((particleDensity / 100) * MAX_PARTICLES_PER_BLOCK);
+            if (numToEmit === 0) return;
+
+            let colorBase, velY, life, gravity;
+            switch (theme) {
+                case 'fire':
+                    colorBase = 0xff8800; velY = [0.08, 0.12]; life = [0.6, 1.0]; gravity = 0.0005;
+                    break;
+                case 'ice':
+                    colorBase = 0x88ccff; velY = [0.01, 0.05]; life = [1.0, 1.5]; gravity = 0.0015;
+                    break;
+                case 'shadow':
+                    colorBase = 0xcc88ff; velY = [0.03, 0.08]; life = [1.0, 1.2]; gravity = 0.0008;
+                    break;
+                case 'rune-energy':
+                default:
+                    colorBase = 0x88ff88; velY = [0.08, 0.12]; life = [0.8, 1.2]; gravity = 0.001;
+                    break;
+            }
+
+            for (let i = 0; i < numToEmit; i++) {
+                let p = particles.find(p => p.life <= 0);
+                if (p) {
+                    p.position.set(blockData.x, blockData.y, blockData.z);
+                    p.velocity.set((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05);
+                    p.color = new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3);
+                    p.maxLife = p.life = life[0] + Math.random() * (life[1] - life[0]);
+                    p.size = 1 + Math.random() * 2;
+                    p.gravity = gravity;
+                } else if (particles.length < 5000) {
+                    p = {
+                        position: new THREE.Vector3(blockData.x, blockData.y, blockData.z),
+                        velocity: new THREE.Vector3((Math.random() - 0.5) * 0.05, velY[0] + Math.random() * (velY[1] - velY[0]), (Math.random() - 0.5) * 0.05),
+                        color: new THREE.Color(colorBase).multiplyScalar(0.7 + Math.random() * 0.3),
+                        maxLife: life[0] + Math.random() * (life[1] - life[0]), life: life[0] + Math.random() * (life[1] - life[0]),
+                        size: 1 + Math.random() * 2, opacity: 1, gravity: gravity
+                    };
+                    particles.push(p);
+                }
+            }
+        }
+
+
+
+        // ====================================================================
+        // UI Interaction Handlers
+        // ====================================================================
+
+        // 改为调用核心处理函数
+        function handleModelLoad(event) {
 
             const animationSpeed = parseFloat(document.getElementById('animation-speed-slider').value) || 1.0;
             const voxels = [];
@@ -1921,12 +2415,6 @@ ${historyString}
             console.log("Application initialization complete (loaded default files).");
         }
 
-        // Make key functions globally available for testing
-        window.init = init;
-        window.initializeApp = initializeApp;
-        window.displayVoxels = displayVoxels;
-        window.unlockUI = unlockUI;
-        window.playFallingAnimation = playFallingAnimation;
 
         async function handleApiKeyValidation() {
             const modalInput = document.getElementById('modal-api-key-input');
@@ -2087,12 +2575,32 @@ ${historyString}
             document.getElementById('import-url-btn').addEventListener('click', handleImportFromUrl);
 
             // --- 动画功能事件监听器 ---
-            document.getElementById('play-animation-btn').addEventListener('click', playFallingAnimation);
-            const animationSpeedSlider = document.getElementById('animation-speed-slider');
-            const animationSpeedValue = document.getElementById('animation-speed-value');
-            animationSpeedSlider.addEventListener('input', () => {
-                animationSpeedValue.textContent = parseFloat(animationSpeedSlider.value).toFixed(1);
+            let currentEffect = 'magic-gradient';
+            let currentMagicTheme = 'rune-energy';
+            let particleDensity = 33;
+
+            const effectSelector = document.getElementById('effectSelector');
+            const magicSelector = document.getElementById('magicSelector');
+            const particleSlider = document.getElementById('particleSlider');
+            const particleDensityLabel = document.getElementById('particleDensityLabel');
+            const startBuildBtn = document.getElementById('start-build-btn');
+
+            effectSelector.addEventListener('change', (e) => { currentEffect = e.target.value; });
+            magicSelector.addEventListener('change', (e) => { currentMagicTheme = e.target.value; });
+            particleSlider.addEventListener('input', (e) => {
+                particleDensity = parseInt(e.target.value, 10);
+                particleDensityLabel.textContent = `${particleDensity}%`;
             });
+            startBuildBtn.addEventListener('click', () => {
+                 addAiChatMessage('system', `开始生成! 动画: ${currentEffect}, 主题: ${currentMagicTheme}, 密度: ${particleDensity}%`);
+                 animateBuild();
+            });
+
+            // Expose functions and variables for Playwright verification
+            window.initializeApp = initializeApp;
+            window.displayVoxels = displayVoxels;
+            window.currentVoxelCoords = currentVoxelCoords;
+            window.voxelProperties = voxelProperties;
         });
 
         // --- 存档功能函数 ---
@@ -2302,6 +2810,8 @@ ${historyString}
                 addAiChatMessage('system', `❌ 应用存档数据时出错: ${error.message}`);
             }
         }
+
+        window.mainScriptReady = true;
 
     </script>
 </body>
