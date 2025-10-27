@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>材质包功能测试</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #333; background: #222; }
+        .success { color: #00ff00; }
+        .error { color: #ff0000; }
+        .warning { color: #ffaa00; }
+        pre { background: #111; padding: 10px; overflow-x: auto; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>🎨 材质包功能测试</h1>
+    
+    <div class="test-section">
+        <h2>1️⃣ 测试API响应</h2>
+        <button onclick="testApiResponse()">运行测试</button>
+        <pre id="api-test-result">等待测试...</pre>
+    </div>
+    
+    <div class="test-section">
+        <h2>2️⃣  测试Base64解码</h2>
+        <button onclick="testBase64Decode()">运行测试</button>
+        <pre id="decode-test-result">等待测试...</pre>
+    </div>
+    
+    <div class="test-section">
+        <h2>3️⃣ 测试JSZip加载</h2>
+        <button onclick="testJSZipLoad()">运行测试</button>
+        <pre id="jszip-test-result">等待测试...</pre>
+    </div>
+    
+    <div class="test-section">
+        <h2>4️⃣ 完整流程测试</h2>
+        <button onclick="testFullProcess()">运行完整测试</button>
+        <pre id="full-test-result">等待测试...</pre>
+    </div>
+
+    <script>
+        let apiData = null;
+        
+        async function testApiResponse() {
+            const output = document.getElementById('api-test-result');
+            output.innerHTML = '正在测试...\n';
+            
+            try {
+                const response = await fetch('/api/files');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                apiData = data;
+                
+                let result = '<span class="success">✅ API响应正常</span>\n\n';
+                result += `响应数据:\n`;
+                result += `- 包含model: ${!!data.model}\n`;
+                result += `- 包含texture: ${!!data.texture}\n`;
+                result += `- 包含reference: ${!!data.reference}\n\n`;
+                
+                if (data.texture) {
+                    result += `材质包信息:\n`;
+                    result += `- 名称: ${data.texture.name}\n`;
+                    result += `- MIME类型: ${data.texture.mimeType}\n`;
+                    result += `- 数据长度: ${data.texture.data.length.toLocaleString()} 字符\n`;
+                    result += `- 预估大小: ${Math.round(data.texture.data.length * 3 / 4).toLocaleString()} 字节\n`;
+                    result += '<span class="success">✅ 材质包数据完整</span>\n';
+                } else {
+                    result += '<span class="error">❌ 未找到材质包数据</span>\n';
+                }
+                
+                output.innerHTML = result;
+            } catch (error) {
+                output.innerHTML = `<span class="error">❌ 错误: ${error.message}</span>`;
+            }
+        }
+        
+        async function testBase64Decode() {
+            const output = document.getElementById('decode-test-result');
+            output.innerHTML = '正在测试...\n';
+            
+            if (!apiData || !apiData.texture) {
+                output.innerHTML = '<span class="warning">⚠️ 请先运行API测试</span>';
+                return;
+            }
+            
+            try {
+                const base64Data = apiData.texture.data;
+                const mimeType = apiData.texture.mimeType;
+                
+                // 方法1: 使用fetch + data URL
+                const response = await fetch(`data:${mimeType};base64,${base64Data}`);
+                const arrayBuffer = await response.arrayBuffer();
+                
+                let result = '<span class="success">✅ Base64解码成功</span>\n\n';
+                result += `解码结果:\n`;
+                result += `- ArrayBuffer大小: ${arrayBuffer.byteLength.toLocaleString()} 字节\n`;
+                result += `- 类型: ${arrayBuffer.constructor.name}\n`;
+                
+                // 检查ZIP签名
+                const uint8 = new Uint8Array(arrayBuffer);
+                const signature = Array.from(uint8.slice(0, 4))
+                    .map(b => b.toString(16).padStart(2, '0'))
+                    .join(' ');
+                result += `- ZIP签名: ${signature}\n`;
+                
+                if (uint8[0] === 0x50 && uint8[1] === 0x4B) {
+                    result += '<span class="success">✅ ZIP文件签名正确 (PK)</span>\n';
+                } else {
+                    result += '<span class="error">❌ ZIP文件签名错误</span>\n';
+                }
+                
+                output.innerHTML = result;
+            } catch (error) {
+                output.innerHTML = `<span class="error">❌ 错误: ${error.message}</span>`;
+            }
+        }
+        
+        async function testJSZipLoad() {
+            const output = document.getElementById('jszip-test-result');
+            output.innerHTML = '正在测试...\n';
+            
+            if (typeof JSZip === 'undefined') {
+                output.innerHTML = '<span class="error">❌ JSZip未加载</span>';
+                return;
+            }
+            
+            if (!apiData || !apiData.texture) {
+                output.innerHTML = '<span class="warning">⚠️ 请先运行API测试</span>';
+                return;
+            }
+            
+            try {
+                const base64Data = apiData.texture.data;
+                const mimeType = apiData.texture.mimeType;
+                
+                // 解码
+                const response = await fetch(`data:${mimeType};base64,${base64Data}`);
+                const arrayBuffer = await response.arrayBuffer();
+                
+                // 加载ZIP
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                
+                // 查找材质文件
+                const texturePathPrefix = 'assets/minecraft/textures/blocks/';
+                const textureFiles = [];
+                
+                zip.forEach((relativePath, zipEntry) => {
+                    if (relativePath.startsWith(texturePathPrefix) && 
+                        relativePath.toLowerCase().endsWith('.png') && 
+                        !zipEntry.dir) {
+                        const textureName = relativePath.substring(texturePathPrefix.length)
+                            .replace(/\\.png$/i, '');
+                        if (textureName) {
+                            textureFiles.push(textureName);
+                        }
+                    }
+                });
+                
+                let result = '<span class="success">✅ JSZip加载成功</span>\n\n';
+                result += `ZIP内容:\n`;
+                result += `- 总文件数: ${Object.keys(zip.files).length}\n`;
+                result += `- 材质文件数: ${textureFiles.length}\n\n`;
+                
+                result += `前10个材质:\n`;
+                textureFiles.slice(0, 10).forEach((name, i) => {
+                    result += `  ${i + 1}. ${name}\n`;
+                });
+                
+                if (textureFiles.length > 10) {
+                    result += `  ... 还有 ${textureFiles.length - 10} 个\n`;
+                }
+                
+                result += '\n<span class="success">✅ 材质包结构正确</span>\n';
+                
+                output.innerHTML = result;
+            } catch (error) {
+                output.innerHTML = `<span class="error">❌ 错误: ${error.message}\n${error.stack}</span>`;
+            }
+        }
+        
+        async function testFullProcess() {
+            const output = document.getElementById('full-test-result');
+            output.innerHTML = '正在运行完整测试...\n\n';
+            
+            try {
+                // Step 1: API
+                output.innerHTML += '1️⃣ 获取API数据...\n';
+                const response = await fetch('/api/files');
+                const data = await response.json();
+                
+                if (!data.texture) {
+                    throw new Error('API未返回材质包');
+                }
+                output.innerHTML += '<span class="success">✅ API数据获取成功</span>\n\n';
+                
+                // Step 2: Decode
+                output.innerHTML += '2️⃣ 解码Base64...\n';
+                const arrayBuffer = await fetch(`data:${data.texture.mimeType};base64,${data.texture.data}`)
+                    .then(res => res.arrayBuffer());
+                output.innerHTML += `<span class="success">✅ 解码成功 (${arrayBuffer.byteLength.toLocaleString()} 字节)</span>\n\n`;
+                
+                // Step 3: Load ZIP
+                output.innerHTML += '3️⃣ 加载ZIP...\n';
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                output.innerHTML += `<span class="success">✅ ZIP加载成功 (${Object.keys(zip.files).length} 个文件)</span>\n\n`;
+                
+                // Step 4: Extract textures
+                output.innerHTML += '4️⃣ 提取材质...\n';
+                const texturePathPrefix = 'assets/minecraft/textures/blocks/';
+                let textureCount = 0;
+                
+                zip.forEach((relativePath, zipEntry) => {
+                    if (relativePath.startsWith(texturePathPrefix) && 
+                        relativePath.toLowerCase().endsWith('.png') && 
+                        !zipEntry.dir) {
+                        textureCount++;
+                    }
+                });
+                
+                output.innerHTML += `<span class="success">✅ 找到 ${textureCount} 个材质</span>\n\n`;
+                
+                // Success
+                output.innerHTML += '='*60 + '\n';
+                output.innerHTML += '<span class="success">🎉 所有测试通过！材质包功能正常！</span>\n';
+                output.innerHTML += '='*60 + '\n';
+                
+            } catch (error) {
+                output.innerHTML += `\n<span class="error">❌ 测试失败: ${error.message}\n${error.stack}</span>`;
+            }
+        }
+        
+        // 自动运行测试
+        window.addEventListener('load', () => {
+            console.log('JSZip loaded:', typeof JSZip !== 'undefined');
+            console.log('Page ready');
+        });
+    </script>
+</body>
+</html>
