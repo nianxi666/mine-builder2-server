@@ -107,16 +107,18 @@ def inference_during_training(model, device, output_dir, step, num_samples=2, nu
     with torch.no_grad():
         for i in range(num_samples):
             # 生成 (model作为参数传给sample方法)
+            # 注意：shape应该是(batch_size, channels, D, H, W)
+            # batch_size=1 对于单个样本
             sample = sampler.sample(
                 model=model,
-                shape=(2, 16, 16, 16),
+                shape=(1, 2, 16, 16, 16),  # batch_size=1
                 device=device,
                 num_steps=num_steps
             )
             
-            # 保存
+            # 保存 (sample[0]去掉batch维度)
             save_inference_result(
-                sample[0],
+                sample[0],  # (2, 16, 16, 16)
                 output_dir,
                 step,
                 i
