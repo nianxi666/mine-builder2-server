@@ -99,16 +99,19 @@ def inference_during_training(model, device, output_dir, step, num_samples=2, nu
     """训练中推理"""
     model.eval()
     
-    sampler = DDIMSampler(model, num_steps=num_steps)
+    # 创建sampler（DDIMSampler不需要model作为参数）
+    sampler = DDIMSampler()
     
     print(f"\n🎨 Step {step}: 生成 {num_samples} 个样本...")
     
     with torch.no_grad():
         for i in range(num_samples):
-            # 生成
+            # 生成 (model作为参数传给sample方法)
             sample = sampler.sample(
+                model=model,
                 shape=(2, 16, 16, 16),
-                device=device
+                device=device,
+                num_steps=num_steps
             )
             
             # 保存
