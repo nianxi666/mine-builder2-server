@@ -1,0 +1,133 @@
+================================================
+Minecraft 16x16x16 DiT 训练系统 - 项目结构
+================================================
+
+核心ML文件：
+├── dit_model.py                    # DiT模型定义（3D Diffusion Transformer）
+├── train.py                        # 训练脚本（支持GPU、混合精度）
+├── inference.py                    # 推理脚本（DDPM/DDIM采样器）
+├── test_system.py                  # 系统测试脚本
+
+数据集生成器：
+├── create_synthetic_dataset.py    # ⭐ 合成数据生成器（推荐，已生成1000样本）
+├── dataset_generator_simple.py    # Gemini简化版生成器
+├── dataset_generator.py           # Gemini函数调用版生成器
+
+便捷脚本：
+├── run_pipeline.sh                # 完整训练流程脚本
+├── quick_start.sh                 # 快速测试脚本
+
+文档：
+├── QUICK_START_GUIDE.md          # ⭐ 快速开始指南（推荐阅读）
+├── IMPLEMENTATION_SUMMARY.md     # ⭐ 实现总结（推荐阅读）
+├── README_ML.md                  # 详细技术文档
+├── requirements_ml.txt           # Python依赖列表
+├── PROJECT_STRUCTURE.txt         # 本文档
+
+数据和输出（.gitignore）：
+├── dataset/                      # ⭐ 训练数据集（1000样本，已生成）
+│   ├── sample_0000/
+│   │   ├── data.json             # JSON格式
+│   │   └── voxels.npz            # NPZ格式（训练用）
+│   ├── sample_0001/
+│   ├── ...
+│   └── metadata.json
+│
+├── outputs/                      # 训练输出目录（运行train.py后生成）
+│   ├── checkpoints/              # 模型检查点
+│   │   ├── latest.pt
+│   │   └── checkpoint_*.pt
+│   ├── config.json               # 训练配置
+│   └── train.log                 # 训练日志
+│
+└── generated/                    # 生成结果目录（运行inference.py后生成）
+    ├── sample_0000.json          # 生成的schematic（JSON）
+    ├── sample_0000.npz           # 生成的schematic（NPZ）
+    └── ...
+
+原有项目文件：
+├── server.py                     # Mine Builder 2 Server主程序
+├── view.html                     # Web界面
+├── faithful32pack.zip            # 材质包
+└── README.md                     # 原项目README
+
+================================================
+快速开始（3步）：
+================================================
+
+1. 测试系统
+   $ python3 test_system.py
+
+2. 训练模型（数据集已准备好）
+   $ python3 train.py --epochs 100 --use-amp
+
+3. 生成建筑
+   $ python3 inference.py --checkpoint outputs/checkpoints/latest.pt --num-samples 10
+
+================================================
+远程GPU训练：
+================================================
+
+1. 上传整个项目到GPU服务器
+2. 安装依赖：
+   $ pip install torch torchvision google-generativeai tqdm numpy
+
+3. 后台训练：
+   $ nohup python3 train.py --model-size base --batch-size 16 --epochs 200 --use-amp > training.log 2>&1 &
+
+4. 监控训练：
+   $ tail -f training.log
+
+================================================
+生成更多数据集（可选）：
+================================================
+
+方案A: 合成数据（快速）
+$ python3 create_synthetic_dataset.py --num-samples 2000
+
+方案B: Gemini生成（需API密钥）
+$ python3 dataset_generator_simple.py --api-key YOUR_KEY --num-samples 2000
+
+================================================
+关键参数：
+================================================
+
+模型大小：
+  --model-size small   # 33M参数，6GB+ VRAM
+  --model-size base    # 86M参数，16GB+ VRAM
+  --model-size large   # 458M参数，24GB+ VRAM
+
+训练：
+  --epochs 100         # 训练轮数
+  --batch-size 16      # 批次大小
+  --use-amp            # 混合精度训练（推荐）
+  --lr 1e-4            # 学习率
+
+推理：
+  --sampler ddim       # 快速采样（50步，推荐）
+  --sampler ddpm       # 完整采样（1000步，更慢）
+  --num-samples 10     # 生成数量
+
+================================================
+技术特点：
+================================================
+
+✅ 最新DiT架构（Diffusion Transformer 2023）
+✅ 3D体素生成专用设计
+✅ 混合精度训练（节省显存）
+✅ DDIM快速采样（50步达到DDPM 1000步质量）
+✅ 完整数据集（1000样本已生成）
+✅ 生产就绪（错误处理、检查点管理）
+
+================================================
+需要帮助？
+================================================
+
+阅读文档：
+- QUICK_START_GUIDE.md - 快速开始
+- IMPLEMENTATION_SUMMARY.md - 实现总结
+- README_ML.md - 详细技术文档
+
+API密钥：AIzaSyB3xn379AZKVmCEIywishHGo_57GDj1o9A
+
+================================================
