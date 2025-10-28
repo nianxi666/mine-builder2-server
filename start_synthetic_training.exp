@@ -1,0 +1,110 @@
+#!/usr/bin/expect -f
+# 一键启动合成数据训练
+
+set timeout 600
+
+spawn ssh -p 30022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root4563@root@ssh-06aace8d2b864475e7b3e2eb54a8107e.zlrast8j3bxb@direct.virtaicloud.com
+
+expect "password:"
+send "liu20062020\r"
+
+expect "#"
+send "echo '=========================================='\r"
+expect "#"
+send "echo '🚀 启动合成数据训练流程'\r"
+expect "#"
+send "echo '=========================================='\r"
+expect "#"
+send "echo ''\r"
+expect "#"
+
+send "cd /gemini/code/upload_package\r"
+expect "#"
+
+send "echo '📊 步骤1: 生成合成数据（200个样本）...'\r"
+expect "#"
+
+send "python3 create_synthetic_dataset.py --num-samples 200 --output-dir /gemini/code/dataset_synthetic\r"
+expect {
+    "Generated" {
+        exp_continue
+    }
+    "samples" {
+        send "echo '✅ 数据生成完成'\r"
+    }
+    timeout {
+        send "echo '⚠️  超时'\r"
+    }
+}
+expect "#"
+
+send "echo ''\r"
+send "echo '📈 数据统计:'\r"
+expect "#"
+
+send "ls -d /gemini/code/dataset_synthetic/sample_* | wc -l\r"
+expect "#"
+
+send "echo ''\r"
+send "echo '🏋️  步骤2: 启动训练（在screen中）...'\r"
+expect "#"
+
+send "screen -dmS training bash -c '\r"
+send "python3 train_with_inference.py \\\\\r"
+send "  --dataset-dir /gemini/code/dataset_synthetic \\\\\r"
+send "  --output-dir /gemini/code/outputs_synthetic \\\\\r"
+send "  --model-size small \\\\\r"
+send "  --batch-size 8 \\\\\r"
+send "  --epochs 100 \\\\\r"
+send "  --lr 1e-4 \\\\\r"
+send "  --use-amp \\\\\r"
+send "  --save-every 50 \\\\\r"
+send "  --inference-every 10 \\\\\r"
+send "  --inference-samples 2 \\\\\r"
+send "  --inference-steps 50 \\\\\r"
+send "  --num-workers 4 \\\\\r"
+send "  2>&1 | tee /gemini/code/training_synthetic.log'\r"
+expect "#"
+
+send "sleep 3\r"
+expect "#"
+
+send "echo '✅ 训练已启动'\r"
+expect "#"
+
+send "echo ''\r"
+send "screen -ls\r"
+expect "#"
+
+send "echo ''\r"
+send "echo '⏰ 等待10秒后检查训练状态...'\r"
+expect "#"
+
+send "sleep 10\r"
+expect "#"
+
+send "tail -20 /gemini/code/training_synthetic.log\r"
+expect "#"
+
+send "echo ''\r"
+send "echo '=========================================='\r"
+expect "#"
+send "echo '✅ 启动完成！'\r"
+expect "#"
+send "echo ''\r"
+expect "#"
+send "echo '监控命令:'\r"
+expect "#"
+send "echo '  screen -r training    # 查看训练'\r"
+expect "#"
+send "echo '  tail -f /gemini/code/training_synthetic.log'\r"
+expect "#"
+send "echo ''\r"
+expect "#"
+send "echo '预计时间: 2-4小时'\r"
+expect "#"
+send "echo '=========================================='\r"
+expect "#"
+
+send "exit\r"
+expect eof
