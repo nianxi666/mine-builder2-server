@@ -1,0 +1,20 @@
+# ML Training Requirements for DiT Minecraft Voxel Generation
+
+# Core ML frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+
+# Google AI
+google-generativeai>=0.3.0
+
+# Utilities
+tqdm>=4.65.0
+pillow>=9.5.0
+
+# Optional but recommended
+tensorboard>=2.12.0
+wandb>=0.15.0
+
+# Data processing
+h5py>=3.8.0

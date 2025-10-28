@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+venv_ml/
+ENV/
+env/
+.venv
+
+# ML Training
+dataset/
+dataset_test/
+dataset_gemini/
+outputs/
+outputs_test/
+generated/
+generated_test/
+*.pt
+*.pth
+*.ckpt
+*.log
+*.npz
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+.pytest_cache/
+
+# TensorBoard
+runs/
+logs/
+
+# Data
+*.h5
+*.hdf5
